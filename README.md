@@ -15,7 +15,7 @@ JDF runs in three places:
 
 | Surface | What it is | Install |
 |---|---|---|
-| **JDF Reader** | Native macOS app — read, edit, import PDF/MD, export PDF | `brew tap uurtech/jdf && brew install jdf` |
+| **JDF Reader** | Native desktop app — read, edit, import PDF/MD, export PDF | macOS: `brew tap uurtech/jdf && brew install jdf` · Windows: `winget install UurTech.JDFReader` |
 | **jdf.js** | JavaScript library — embed `.jdf` files on any web page | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.1.21">` |
 | **`@uurtech/jdf-cli`** | CLI — validate, convert PDF→JDF, wrap LLM JSON output into JDF | `npx @uurtech/jdf-cli import paper.pdf` |
 
@@ -83,7 +83,17 @@ The Cask formula lives in a separate tap repo: [`uurtech/homebrew-jdf/Casks/jdf.
 
 ### Desktop · Windows
 
-Download the `.exe` (NSIS) or `.msi` installer from the [latest release](https://github.com/uurtech/jdf/releases/latest) and run it. The installer registers `.jdf` and `.jdfx` file associations automatically.
+```powershell
+winget install UurTech.JDFReader
+```
+
+Or download the `.exe` (NSIS) or `.msi` installer from the [latest release](https://github.com/uurtech/jdf/releases/latest) and run it. The installer registers `.jdf` and `.jdfx` file associations automatically.
+
+Upgrade later:
+
+```powershell
+winget upgrade UurTech.JDFReader
+```
 
 ### Desktop · Linux
 
@@ -222,7 +232,8 @@ Editing lives in the desktop Reader only — jdf.js is a viewer, the CLI is non-
 | Surface | How to get it |
 |---|---|
 | **JDF Reader** (macOS) | `brew tap uurtech/jdf && brew install jdf` — DMG / `.app`, signed via GitHub release |
-| **JDF Reader** (Linux / Windows) | `.deb` / `.AppImage` / `.rpm` / `.msi` / `.exe` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
+| **JDF Reader** (Windows) | `winget install UurTech.JDFReader` or `.exe` / `.msi` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
+| **JDF Reader** (Linux) | `.deb` / `.AppImage` / `.rpm` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
 | **jdf.js** | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.1.21">` |
 | **`@uurtech/jdf-cli`** | `npx @uurtech/jdf-cli validate file.jdf` (no install) |
 
