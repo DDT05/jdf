@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
-import type { TableElement, Style, TableCellValue, TableBorders } from "@jdf/core";
+import type { TableElement, Style, TableCellValue, TableBorders, TextAlign } from "@jdf/core";
+import { MM_TO_PX } from "@jdf/core";
 import { resolveStyle, styleToCss } from "./PageRenderer";
 import { Editable } from "../shared/Editable";
 import { useEdit, type ElementPath } from "../../edit/context";
@@ -11,12 +12,28 @@ interface TableElementViewProps {
 }
 
 function cellText(c: TableCellValue): string {
-  return typeof c === "string" ? c : c.content;
+  // Tolerate malformed cells (null, numbers, missing content) — keep the web
+  // embed (jdf.js) and reader byte-identical in leniency so the same document
+  // renders the same rows on both surfaces.
+  if (c == null) return "";
+  if (typeof c === "string") return c;
+  if (typeof c === "object") return c.content == null ? "" : String(c.content);
+  return String(c);
 }
 
 function cellAttrs(c: TableCellValue) {
-  if (typeof c === "string") return {};
+  if (c == null || typeof c !== "object") return {};
   return { colspan: c.colspan, rowspan: c.rowspan };
+}
+
+function cellAlign(c: TableCellValue): TextAlign | undefined {
+  return c == null || typeof c !== "object" ? undefined : c.align;
+}
+
+/** Normalise a column width (number → px, string passed through, e.g. "30%"). */
+function colWidthCss(w: string | number | undefined): string | undefined {
+  if (w == null) return undefined;
+  return typeof w === "number" ? `${w * MM_TO_PX}px` : w;
 }
 
 export function TableElementView(props: TableElementViewProps) {
@@ -57,7 +74,30 @@ export function TableElementView(props: TableElementViewProps) {
     return { outer: true, inner: true, color: "#e2e8f0", width: 1, ...b };
   };
 
-  const headers = () => props.element.headers ?? props.element.columns?.map((c) => c.header || "").filter((h) => h !== "");
+  // Keep header indices aligned with columns: filtering out empty headers
+  // shifted every later index, so editing header 2 wrote to column 1.
+  const headers = () => {
+    if (props.element.headers) return props.element.headers;
+    const fromCols = props.element.columns?.map((c) => c.header || "");
+    return fromCols && fromCols.some((h) => h !== "") ? fromCols : undefined;
+  };
+
+  function commitHeader(i: number, value: string) {
+    // `headers` may be derived from `columns[*].header`; write back to where
+    // the value actually lives instead of conjuring a `headers` *object*.
+    if (props.element.headers) edit.updateField(props.path, `headers.${i}`, value);
+    else edit.updateField(props.path, `columns.${i}.header`, value);
+  }
+
+  const hasColWidths = () => props.element.columns?.some((c) => c.width != null) ?? false;
+
+  const cellCss = (c: TableCellValue) => {
+    if (c == null || typeof c !== "object" || !c.style) return {};
+    const s = c.style;
+    if (typeof s === "string") return styleToCss(props.styles[s] || {});
+    if (Array.isArray(s)) { let m = {}; for (const k of s) m = { ...m, ...styleToCss(props.styles[k] || {}) }; return m; }
+    return styleToCss(s);
+  };
 
   function commitCell(rowIdx: number, colIdx: number, value: string) {
     const row = props.element.rows[rowIdx];
@@ -76,9 +116,17 @@ export function TableElementView(props: TableElementViewProps) {
         class="w-full border-collapse"
         style={{
           "font-size": "14px",
+          "table-layout": hasColWidths() ? "fixed" : "auto",
           ...(borders().outer ? { border: `${borders().width || 1}px solid ${borders().color || "#e2e8f0"}` } : {}),
         }}
       >
+        <Show when={hasColWidths()}>
+          <colgroup>
+            <For each={props.element.columns!}>
+              {(c) => <col style={{ ...(colWidthCss(c.width) ? { width: colWidthCss(c.width) } : {}) }} />}
+            </For>
+          </colgroup>
+        </Show>
         <Show when={headers() && headers()!.length > 0}>
           <thead>
             <tr style={headerCss()}>
@@ -94,7 +142,7 @@ export function TableElementView(props: TableElementViewProps) {
                     {edit.enabled() ? (
                       <Editable
                         value={h}
-                        onCommit={(v) => edit.updateField(props.path, `headers.${i()}`, v)}
+                        onCommit={(v) => commitHeader(i(), v)}
                       />
                     ) : (
                       h
@@ -114,8 +162,9 @@ export function TableElementView(props: TableElementViewProps) {
                     <td
                       class="px-3 py-2 align-top"
                       style={{
-                        "text-align": props.element.columns?.[colIdx()]?.align || "left",
+                        "text-align": cellAlign(cell) || props.element.columns?.[colIdx()]?.align || "left",
                         ...(borders().inner ? { border: `${borders().width || 1}px solid ${borders().color || "#e2e8f0"}` } : {}),
+                        ...cellCss(cell),
                       }}
                       {...cellAttrs(cell)}
                     >

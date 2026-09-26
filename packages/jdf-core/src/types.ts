@@ -17,6 +17,8 @@ export interface Style {
   fontFamily?: string; fontSize?: number; fontWeight?: FontWeight; fontStyle?: "normal" | "italic";
   textDecoration?: "none" | "underline" | "strikethrough" | "underline strikethrough" | "line-through";
   color?: string; backgroundColor?: string; textAlign?: TextAlign; lineHeight?: number;
+  /** First-line indent in the document unit (mm by default) — written by the PDF importer for indented paragraphs. */
+  textIndent?: number;
   letterSpacing?: number | string; padding?: number | string | Margins;
   margin?: number | string | Margins; marginTop?: number; marginBottom?: number;
   border?: string; borderRadius?: number | string; opacity?: number;
@@ -28,10 +30,14 @@ export type Link = string | { type: LinkType; target: string };
 
 export interface FontResource { family: string; src: "embedded" | "file" | "system"; data?: string; path?: string; weight?: string; style?: string; }
 export interface ImageResource { src?: "embedded" | "file"; mimeType?: string; data?: string; path?: string; }
+/** A binary asset: embedded base64 (`data`) or a file path. Same shape for images and videos. */
+export type VideoResource = ImageResource;
 export type Resources = {
   fonts?: FontResource[];
   images?: Record<string, ImageResource>;
-} & Record<string, ImageResource | undefined>;
+  /** Video assets (`video/mp4`, `video/webm`). In a `.jdfx` they live under `assets/` like images. */
+  videos?: Record<string, VideoResource>;
+} & Record<string, ImageResource | Record<string, ImageResource> | FontResource[] | undefined>;
 
 export interface HeaderFooter {
   height?: number;
@@ -76,11 +82,29 @@ export interface RichTextElement {
   height?: number;
 }
 
+/** One recognised text block of an image (OCR). `bbox` is in fractions of the image (0–1). */
+export interface OcrBlock { text: string; bbox?: { x: number; y: number; w: number; h: number }; confidence?: number; }
+/**
+ * Text recovered from an image — the image-side twin of VideoTranscript. Lives
+ * in document.json (text, not an asset). `jdf describe` writes it; `jdf chunk`
+ * indexes it; reader search finds it. Without it a scanned page or a chart is
+ * invisible to RAG, which is exactly what `jdf rag` reports as "media without text".
+ */
+export interface ImageOcr { language?: string; source?: string; created?: string; blocks: OcrBlock[]; }
+
 export interface ImageElement {
   type: "image";
+  /** Stable id — `jdf chunk` media references and `jdf describe --element` use it. */
+  id?: string;
   resource?: string;
   src?: string;
   alt?: string;
+  /** One-paragraph description of what the image shows (vision model or human). Indexed by RAG. */
+  caption?: string;
+  /** Where the caption came from: "ollama:moondream", "openai:gpt-4o", "manual", … */
+  captionSource?: string;
+  /** Recognised text (OCR) — see ImageOcr. */
+  ocr?: ImageOcr;
   position?: Position;
   width?: number;
   height?: number;
@@ -89,7 +113,59 @@ export interface ImageElement {
   style?: StyleRef;
 }
 
-export type TableCellValue = string | { content: string; style?: StyleRef; colspan?: number; rowspan?: number };
+/**
+ * Video — plays inline in jdf.js and the desktop reader (HTML5 `<video>`).
+ * Source is either a bundled asset (`resource` → `resources.videos[id]`, which a
+ * `.jdfx` stores under `assets/`) or a `src` URL / data URL. PDF export draws a
+ * poster-style placeholder with the title, since PDF cannot play video.
+ */
+/** One spoken/captioned span of a video, in seconds from the start. */
+export interface TranscriptSegment { t0: number; t1: number; text: string; speaker?: string; }
+/**
+ * Time-stamped text for a video — the part of a video RAG can actually use.
+ * Lives in document.json (it is text, not an asset), so a `.jdf` with a hosted
+ * `src` stays a single JSON file. `jdf chunk` turns segments into time-windowed
+ * chunks carrying `media: { element, t0, t1 }`; renderers expose it as captions.
+ */
+export interface VideoTranscript {
+  /** BCP-47 language tag, e.g. "en", "tr". */
+  language?: string;
+  /** Where the text came from: "whisper-large-v3", "srt-import", "manual", … */
+  source?: string;
+  /** When it was produced (ISO 8601). */
+  created?: string;
+  segments: TranscriptSegment[];
+}
+/** Named point in a video; becomes a breadcrumb level for the chunks under it. */
+export interface VideoChapter { t: number; title: string; }
+
+export interface VideoElement {
+  type: "video";
+  /** Stable id — retrieval results point back to `media.element`; needed for `viewer.seek(id, t)`. */
+  id?: string;
+  resource?: string;
+  src?: string;
+  /** Time-stamped text; see VideoTranscript. */
+  transcript?: VideoTranscript;
+  /** Chapter markers; chunk breadcrumbs read "… > Video title > Chapter". */
+  chapters?: VideoChapter[];
+  /** Still frame shown before playback: URL, data URL, or an image resource id. */
+  poster?: string;
+  /** Caption / accessible name. Also what `jdf chunk` and search index. */
+  title?: string;
+  position?: Position;
+  width?: number;
+  height?: number;
+  fit?: ImageFit;
+  /** Show the browser's playback controls (default true). */
+  controls?: boolean;
+  autoplay?: boolean;
+  loop?: boolean;
+  muted?: boolean;
+  style?: StyleRef;
+}
+
+export type TableCellValue = string | { content: string; style?: StyleRef; align?: TextAlign; colspan?: number; rowspan?: number };
 
 export interface TableColumn { width?: string | number; header?: string; align?: TextAlign; }
 
@@ -274,6 +350,7 @@ export type Element =
   | TextElement
   | RichTextElement
   | ImageElement
+  | VideoElement
   | TableElement
   | ListElement
   | ShapeElement
@@ -304,6 +381,32 @@ export interface Meta {
   pageOrientation?: PageOrientation;
   margins?: Margins;
   unit?: Unit;
+  /** Document-level default for flow layout. When true, PDF export lays
+   *  elements out top-to-bottom and auto-paginates overflow. Per-page
+   *  `flow` overrides this. */
+  flow?: boolean;
+}
+
+/** A single retrieval chunk — see `jdf chunk`. Data-only; renderers ignore it. */
+export interface ChunkRecord {
+  id: string;
+  text: string;
+  path: string[];
+  page: number;
+  types: string[];
+  tokens: number;
+  hash: string;
+}
+
+/**
+ * Precomputed RAG index. Optional, derived, cacheable — produced by
+ * `jdf chunk --format inline`. Renderers ignore it entirely; a pipeline reads
+ * `index.chunks` instead of recomputing chunk boundaries. Deleting it never
+ * affects rendering or validity.
+ */
+export interface DocumentIndex {
+  chunker: string;
+  chunks: ChunkRecord[];
 }
 
 export interface JdfDocument {
@@ -314,4 +417,6 @@ export interface JdfDocument {
   header?: HeaderFooter;
   footer?: HeaderFooter;
   pages: Page[];
+  /** Optional precomputed RAG chunk index (see `jdf chunk`). Data-only. */
+  index?: DocumentIndex;
 }

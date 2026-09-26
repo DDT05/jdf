@@ -1,0 +1,175 @@
+{
+  "$jdf": "1.0.0",
+  "meta": {
+    "title": "Video in a JDF document",
+    "author": "JDF",
+    "pageSize": "A4",
+    "unit": "mm",
+    "margins": {
+      "top": 22,
+      "right": 22,
+      "bottom": 22,
+      "left": 22
+    }
+  },
+  "styles": {
+    "h1": {
+      "fontFamily": "Inter",
+      "fontSize": 24,
+      "fontWeight": "bold",
+      "color": "#0f172a"
+    },
+    "body": {
+      "fontFamily": "Inter",
+      "fontSize": 11,
+      "lineHeight": 1.6,
+      "color": "#334155"
+    },
+    "cap": {
+      "fontFamily": "Inter",
+      "fontSize": 9,
+      "color": "#64748b"
+    }
+  },
+  "pages": [
+    {
+      "id": "page-1",
+      "elements": [
+        {
+          "id": "title",
+          "type": "text",
+          "content": "Video in a JDF document",
+          "heading": 1,
+          "style": "h1",
+          "tocEntry": "Video in a JDF document",
+          "tocLevel": 1,
+          "position": {
+            "x": 0,
+            "y": 0
+          },
+          "width": 166
+        },
+        {
+          "id": "intro",
+          "type": "text",
+          "content": "A video element plays inline in jdf.js and the desktop reader. This one points at a hosted file with src; the same element can carry the clip inside a .jdfx bundle instead (see examples/video.jdfx).",
+          "style": "body",
+          "position": {
+            "x": 0,
+            "y": 16
+          },
+          "width": 166
+        },
+        {
+          "id": "clip",
+          "type": "video",
+          "poster": "logo-256.png",
+          "title": "JDF vs PDF for RAG — the benchmark video (hosted file)",
+          "controls": true,
+          "position": {
+            "x": 0,
+            "y": 44
+          },
+          "width": 166,
+          "height": 93.4,
+          "fit": "contain",
+          "src": "demos/rag-benchmark.mp4",
+          "transcript": {
+            "language": "en",
+            "source": "srt-import",
+            "created": "2026-09-13T12:42:41.961Z",
+            "segments": [
+              {
+                "t0": 0,
+                "t1": 3.6,
+                "text": "Twenty-four reports. One hundred ninety-two questions. Same pipeline. PDF versus JDF."
+              },
+              {
+                "t0": 3.6,
+                "t1": 7.2,
+                "text": "Answer inside the first one thousand tokens: JDF ninety-nine percent, PDF converted to JDF ninety-nine percent, best raw PDF eighty-three percent."
+              },
+              {
+                "t0": 7.2,
+                "t1": 10.8,
+                "text": "Tokens handed to the model per question: seven hundred fifty-three versus twelve hundred twenty-four. Thirty-eight percent less LLM spend."
+              },
+              {
+                "t0": 10.8,
+                "t1": 14.4,
+                "text": "Edit one paragraph: JDF re-embeds one chunk of one hundred ninety-two. A PDF re-embeds every chunk of every file. Sixteen times cheaper re-indexing."
+              },
+              {
+                "t0": 14.4,
+                "t1": 18,
+                "text": "Nine hundred forty-one dollars saved per million questions, measured. Ten times the questions, ten times the saving, estimated."
+              },
+              {
+                "t0": 18,
+                "t1": 21.6,
+                "text": "Only have PDFs? jdf convert. Eighty percent top-one after conversion."
+              },
+              {
+                "t0": 21.6,
+                "t1": 25.2,
+                "text": "Measured, not claimed. Run python rag_bench.py --verify yourself."
+              }
+            ]
+          },
+          "chapters": [
+            {
+              "t": 0,
+              "title": "Setup"
+            },
+            {
+              "t": 3.6,
+              "title": "Accuracy"
+            },
+            {
+              "t": 7.2,
+              "title": "Tokens"
+            },
+            {
+              "t": 10.8,
+              "title": "Re-indexing"
+            },
+            {
+              "t": 14.4,
+              "title": "Savings"
+            },
+            {
+              "t": 18,
+              "title": "Convert your PDFs"
+            },
+            {
+              "t": 21.6,
+              "title": "Verify"
+            }
+          ]
+        },
+        {
+          "id": "cap",
+          "type": "text",
+          "content": "Figure 1 — hosted video via src (relative URL), poster from the site.",
+          "style": "cap",
+          "position": {
+            "x": 0,
+            "y": 146
+          },
+          "width": 166
+        },
+        {
+          "id": "how",
+          "type": "text",
+          "content": "Authoring: { \"type\": \"video\", \"resource\": \"clip\", \"poster\": \"poster\", \"title\": \"…\" } with the bytes in resources.videos.clip — or { \"type\": \"video\", \"src\": \"https://…/clip.mp4\" } for a hosted file. jdf chunk indexes the title as [video: …].",
+          "style": "body",
+          "position": {
+            "x": 0,
+            "y": 156
+          },
+          "width": 166
+        }
+      ]
+    }
+  ]
+}

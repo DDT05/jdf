@@ -3,6 +3,8 @@ import type {
   TextElement, RichTextElement, ImageElement, TableElement, ListElement,
   ShapeElement, CollapsibleElement, TocElement, RichTextRun, ListItem, TableCellValue, ImageResource,
   FormInputElement, FormTextareaElement, FormCheckboxElement, FormSelectElement, FormSignatureElement,
+  TextAlign,
+  VideoElement,
 } from "@jdf/core";
 import { unitToPx } from "@jdf/core";
 import { resolveStyle, styleToCss, applyStyle } from "../utils/style";
@@ -34,6 +36,7 @@ export function renderElement(el: Element, ctx: RenderContext): HTMLElement | nu
     case "text": inner = renderText(el, ctx); break;
     case "richtext": inner = renderRichText(el, ctx); break;
     case "image": inner = renderImage(el, ctx); break;
+    case "video": inner = renderVideo(el, ctx); break;
     case "table": inner = renderTable(el, ctx); break;
     case "list": inner = renderList(el, ctx); break;
     case "shape": inner = renderShape(el); break;
@@ -44,8 +47,15 @@ export function renderElement(el: Element, ctx: RenderContext): HTMLElement | nu
     case "checkbox": inner = renderFormCheckbox(el, ctx); break;
     case "select": inner = renderFormSelect(el, ctx); break;
     case "signature": inner = renderFormSignature(el, ctx); break;
+    default: {
+      // Same visible fallback as the desktop reader — an element must never vanish silently.
+      inner = document.createElement("div");
+      inner.className = "jdfjs-unknown";
+      inner.textContent = `[unknown: ${(el as any).type}]`;
+    }
   }
   if (!inner) return null;
+  wrap.dataset.jdfType = String((el as any).type);
   wrap.appendChild(inner);
   return wrap;
 }
@@ -93,6 +103,7 @@ function textTag(h: TextElement["heading"]): keyof HTMLElementTagNameMap {
 // ── richtext ────────────────────────────────────────────────────────────────
 function renderRichText(el: RichTextElement, ctx: RenderContext): HTMLElement {
   const p = document.createElement("p");
+  p.style.whiteSpace = "pre-wrap"; // keep "\n" line breaks (folded paragraphs) — same as the reader
   p.className = "jdfjs-richtext";
   p.style.margin = "0";
   applyStyle(p, resolveStyle(el.style, ctx.styles));
@@ -140,7 +151,74 @@ function lookupResource(resources: Resources | undefined, key: string): ImageRes
   if (direct && typeof direct === "object" && "data" in direct) return direct as ImageResource;
   const inImages = resources.images?.[key];
   if (inImages) return inImages;
+  // Videos live in resources.videos; a .jdfx unpacker binds by MIME type.
+  const inVideos = resources.videos?.[key];
+  if (inVideos) return inVideos;
   return undefined;
+}
+
+function mediaSrc(el: { src?: string; resource?: string }, resources: Resources | undefined, fallbackMime: string): string {
+  if (el.src?.startsWith("data:") || el.src?.startsWith("http")) return el.src;
+  if (el.resource) {
+    const res = lookupResource(resources, el.resource);
+    if (res?.data) {
+      const mime = res.mimeType || fallbackMime;
+      if (res.data.startsWith("data:")) return res.data;
+      return `data:${mime};base64,${res.data}`;
+    }
+    if (res?.path) return res.path;
+  }
+  return el.src || "";
+}
+
+// ── video ───────────────────────────────────────────────────────────────────
+function renderVideo(el: VideoElement, ctx: RenderContext): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "jdfjs-video";
+  wrap.style.width = "100%";
+  wrap.style.height = "100%";
+  const video = document.createElement("video");
+  video.src = mediaSrc(el, ctx.resources, "video/mp4");
+  if (el.poster) {
+    // Poster may be an image resource id or a URL / data URL.
+    const res = lookupResource(ctx.resources, el.poster);
+    video.poster = res?.data ? (res.data.startsWith("data:") ? res.data : `data:${res.mimeType || "image/png"};base64,${res.data}`) : el.poster;
+  }
+  if (el.title) { video.title = el.title; video.setAttribute("aria-label", el.title); }
+  video.controls = el.controls !== false;
+  video.autoplay = !!el.autoplay;
+  video.loop = !!el.loop;
+  // Browsers only allow autoplay when muted.
+  video.muted = !!el.muted || !!el.autoplay;
+  video.playsInline = true;
+  video.preload = "metadata";
+  video.style.display = "block";
+  video.style.width = "100%";
+  video.style.height = "100%";
+  video.style.background = "#000";
+  switch (el.fit) {
+    case "cover": video.style.objectFit = "cover"; break;
+    case "fill": video.style.objectFit = "fill"; break;
+    case "none": video.style.objectFit = "none"; break;
+    default: video.style.objectFit = "contain";
+  }
+  applyStyle(video, resolveStyle(el.style, ctx.styles));
+  if (el.id) video.setAttribute("data-jdf-video", el.id);
+  // Transcript → WebVTT captions, so playback shows the very text RAG indexed.
+  const segs = el.transcript?.segments;
+  if (segs && segs.length) {
+    const ts = (t: number) => { const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60; return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${sec.toFixed(3).padStart(6, "0")}`; };
+    const body = segs.map((sg, i) => `${i + 1}\n${ts(sg.t0)} --> ${ts(Math.max(sg.t1, sg.t0 + 0.2))}\n${sg.speaker ? sg.speaker + ": " : ""}${sg.text}`).join("\n\n");
+    const track = document.createElement("track");
+    track.kind = "captions";
+    track.label = "Transcript";
+    track.srclang = el.transcript?.language || "en";
+    track.src = `data:text/vtt;charset=utf-8,${encodeURIComponent(`WEBVTT\n\n${body}\n`)}`;
+    track.default = true;
+    video.appendChild(track);
+  }
+  wrap.appendChild(video);
+  return wrap;
 }
 
 function imageSrc(el: ImageElement, resources?: Resources): string {
@@ -164,7 +242,9 @@ function renderImage(el: ImageElement, ctx: RenderContext): HTMLElement {
   wrap.style.height = "100%";
   const img = document.createElement("img");
   img.src = imageSrc(el, ctx.resources);
-  img.alt = el.alt || "";
+  // A caption written by `jdf describe` doubles as accessible text and hover title, so the text RAG indexes is the text the reader sees.
+  img.alt = el.alt || el.caption || "";
+  if (el.caption) img.title = el.caption;
   img.style.display = "block";
   img.style.width = "100%";
   img.style.height = "100%";
@@ -181,11 +261,35 @@ function renderImage(el: ImageElement, ctx: RenderContext): HTMLElement {
 
 // ── table ───────────────────────────────────────────────────────────────────
 function cellText(c: TableCellValue): string {
-  return typeof c === "string" ? c : c.content;
+  // Tolerate malformed cells (null, numbers, missing content) instead of
+  // throwing — a single bad cell must never abort the whole render. The reader
+  // (SolidJS <For>) is naturally lenient here; the web embed's .forEach used to
+  // throw on `null.content`, killing the table and every element after it on
+  // the page. Coerce anything non-stringy to a best-effort string.
+  if (c == null) return "";
+  if (typeof c === "string") return c;
+  if (typeof c === "object") return c.content == null ? "" : String(c.content);
+  return String(c);
 }
 function cellAttrs(c: TableCellValue): { colspan?: number; rowspan?: number } {
-  if (typeof c === "string") return {};
+  if (c == null || typeof c !== "object") return {};
   return { colspan: c.colspan, rowspan: c.rowspan };
+}
+/** Per-cell style object → CSS map (string ref / array / inline Style). */
+function cellCss(c: TableCellValue, styles: Record<string, Style>): Record<string, string> {
+  if (c == null || typeof c !== "object" || !c.style) return {};
+  const s = c.style;
+  if (typeof s === "string") return styleToCss(styles[s] || {});
+  if (Array.isArray(s)) { let m = {}; for (const k of s) m = { ...m, ...styleToCss(styles[k] || {}) }; return m; }
+  return styleToCss(s);
+}
+function cellAlign(c: TableCellValue): TextAlign | undefined {
+  return c == null || typeof c !== "object" ? undefined : c.align;
+}
+/** Normalise a column width (number → px, string passed through, e.g. "30%"). */
+function colWidthCss(w: string | number | undefined): string | undefined {
+  if (w == null) return undefined;
+  return typeof w === "number" ? `${unitToPx(w)}px` : w;
 }
 
 function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
@@ -231,8 +335,22 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
   const table = document.createElement("table");
   table.style.width = "100%";
   table.style.borderCollapse = "collapse";
+  table.style.tableLayout = el.columns?.some((c) => c.width != null) ? "fixed" : "auto";
   table.style.fontSize = "14px";
   if (borders.outer) table.style.border = `${borders.width || 1}px solid ${borders.color || "#e2e8f0"}`;
+
+  // Column widths — honour columns[].width via a <colgroup> so both header
+  // and body cells share the same track sizing.
+  if (el.columns?.some((c) => c.width != null)) {
+    const colgroup = document.createElement("colgroup");
+    el.columns.forEach((c) => {
+      const col = document.createElement("col");
+      const w = colWidthCss(c.width);
+      if (w) col.style.width = w;
+      colgroup.appendChild(col);
+    });
+    table.appendChild(colgroup);
+  }
 
   if (headers && headers.length > 0) {
     const thead = document.createElement("thead");
@@ -253,7 +371,14 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
   }
 
   const tbody = document.createElement("tbody");
-  el.rows.forEach((row, ri) => {
+  // Normalise rows/cells defensively: a row that isn't an array (object, null,
+  // stray string) or a table whose `rows` isn't an array must not throw and
+  // abort the page render. Non-array rows are skipped (like the reader's <For>),
+  // matching desktop behaviour so a partly-malformed table still shows its
+  // well-formed rows on the web instead of vanishing.
+  const rows: TableCellValue[][] = Array.isArray(el.rows) ? el.rows : [];
+  rows.forEach((row, ri) => {
+    if (!Array.isArray(row)) return;
     const tr = document.createElement("tr");
     applyStyle(tr, rowCss as any);
     if (ri % 2 === 1) applyStyle(tr, altRowCss as any);
@@ -265,8 +390,10 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
       if (attrs.rowspan) td.rowSpan = attrs.rowspan;
       td.style.padding = "8px 12px";
       td.style.verticalAlign = "top";
-      td.style.textAlign = colAlign(ci) || "left";
+      // Cell-level align wins over the column default.
+      td.style.textAlign = cellAlign(cell) || colAlign(ci) || "left";
       if (borders.inner) td.style.border = `${borders.width || 1}px solid ${borders.color || "#e2e8f0"}`;
+      applyStyle(td, cellCss(cell, ctx.styles));
       tr.appendChild(td);
     });
     tbody.appendChild(tr);

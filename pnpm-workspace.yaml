@@ -3,7 +3,10 @@ packages:
   - "apps/*"
   - "tools/*"
   - "jdfjs"
+  - "demos/*"
+  - "bench"
 allowBuilds:
   esbuild: true
+  tesseract.js: false
 onlyBuiltDependencies:
   - esbuild

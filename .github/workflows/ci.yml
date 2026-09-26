@@ -36,7 +36,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Validate hello-world.jdf
-        run: pnpm --filter @jdf/cli start validate spec/examples/hello-world.jdf
+        run: pnpm --filter @uurtech/jdf-cli start validate spec/examples/hello-world.jdf
 
   rust:
     name: Rust check (${{ matrix.os }})
@@ -132,15 +132,15 @@ jobs:
       - name: Smoke test — CLI validation
         shell: bash
         run: |
-          pnpm --filter @jdf/cli start validate spec/examples/hello-world.jdf
+          pnpm --filter @uurtech/jdf-cli start validate spec/examples/hello-world.jdf
           echo "✓ CLI validate works"
 
       - name: Smoke test — PDF import
         shell: bash
         run: |
           if [ -f "spec/examples/sample.pdf" ]; then
-            pnpm --filter @jdf/cli start import spec/examples/sample.pdf -o ./test-output.jdf --json
-            pnpm --filter @jdf/cli start validate ./test-output.jdf
+            pnpm --filter @uurtech/jdf-cli start convert spec/examples/sample.pdf -o ./test-output.jdf --json
+            pnpm --filter @uurtech/jdf-cli start validate ./test-output.jdf
             echo "✓ PDF import pipeline works"
           else
             echo "⚠ No sample.pdf, skipping"

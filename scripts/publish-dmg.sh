@@ -33,6 +33,37 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# ── Apple Developer ID: code signing + notarization ────────────────────────
+# When all four APPLE_* values are present, Tauri signs the .app with the
+# Developer ID cert (hardened runtime), notarizes it with Apple, and staples
+# the ticket — so `brew install --cask jdf` opens with zero Gatekeeper
+# warnings on any Mac. If any value is missing, we fall back to an UNSIGNED
+# dmg with a loud warning (brew users will then hit "JDF Reader is damaged").
+SIGN_AND_NOTARIZE=0
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" && -n "${APPLE_ID:-}" \
+      && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
+  # Tauri reads the notarization password from APPLE_PASSWORD; our .env names
+  # it APPLE_APP_SPECIFIC_PASSWORD to make its nature explicit — map it here.
+  export APPLE_SIGNING_IDENTITY
+  export APPLE_ID
+  export APPLE_TEAM_ID
+  export APPLE_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
+  SIGN_AND_NOTARIZE=1
+  echo "→ Apple signing identity: $APPLE_SIGNING_IDENTITY (team $APPLE_TEAM_ID)"
+  # Fail fast if the cert isn't actually in the keychain — otherwise the
+  # tauri build dies deep in codesign with a cryptic error.
+  if ! security find-identity -v -p codesigning | grep -q "$APPLE_SIGNING_IDENTITY"; then
+    echo "✗ Signing identity '$APPLE_SIGNING_IDENTITY' not found in keychain."
+    echo "  Create it in Xcode → Settings → Accounts → Manage Certificates →"
+    echo "  '+' → Developer ID Application, then re-run."
+    exit 1
+  fi
+else
+  echo "⚠️  APPLE_* signing vars incomplete in .env — building an UNSIGNED dmg."
+  echo "    brew users will hit 'JDF Reader is damaged'. Fill the four APPLE_*"
+  echo "    values in /.env (see /.env.example) to sign + notarize."
+fi
+
 BUMP="${1:-}"
 if [[ -n "$BUMP" && ! "$BUMP" =~ ^(patch|minor|major)$ ]]; then
   echo "Usage: $0 [patch|minor|major]"
@@ -81,7 +112,14 @@ sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"$NEW_VER\"/" apps/reader/src-
 rm -f apps/reader/src-tauri/Cargo.toml.bak
 
 # ── Step 2: build the dmg ───────────────────────────────────────────────────
-echo "→ Building JDF Reader.app + .dmg (unsigned)..."
+if [[ "$SIGN_AND_NOTARIZE" == "1" ]]; then
+  echo "→ Building JDF Reader.app + .dmg (signed + notarized)..."
+  echo "  (notarization uploads to Apple and can take a few minutes)"
+else
+  echo "→ Building JDF Reader.app + .dmg (UNSIGNED)..."
+fi
+# APPLE_* vars are already exported above; Tauri picks them up and, when the
+# signing identity + notarization creds are present, signs and notarizes.
 pnpm --filter @jdf/reader tauri build --bundles dmg
 
 DMG="$(ls "$DMG_BUNDLE_DIR"/JDF\ Reader_${NEW_VER}_*.dmg 2>/dev/null | head -1)"
@@ -96,6 +134,59 @@ DMG_URL_NAME="${DMG_BASENAME// /.}"   # GitHub replaces spaces with dots in URLs
 SHA256=$(shasum -a 256 "$DMG" | awk '{print $1}')
 echo "→ DMG: $DMG_BASENAME"
 echo "→ sha256: $SHA256"
+
+# Notarize + staple the DMG ITSELF. Tauri only notarizes the .app inside the
+# dmg; the dmg container stays "Unnotarized Developer ID" and Gatekeeper on
+# macOS 15+ greets a downloaded copy with "Apple could not verify … is free
+# of malware" / Move to Trash. Homebrew mounts the dmg with quarantine set,
+# so brew users hit it too. Submitting the dmg is a separate notarytool
+# call; stapling then embeds the ticket so it verifies offline.
+if [[ "$SIGN_AND_NOTARIZE" == "1" ]]; then
+  if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    echo "→ Notarizing the dmg with Apple (notarytool, this can take a few minutes)..."
+    NOTARY_LOG="$(mktemp)"
+    # Capture first, grep after. `… | tee | grep -q` under `pipefail` fails
+    # spuriously: grep -q exits on the first match, tee dies of SIGPIPE, and
+    # the pipeline reports failure even though Apple said "Accepted".
+    xcrun notarytool submit "$DMG" \
+      --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" \
+      --wait --timeout 30m > "$NOTARY_LOG" 2>&1 || true
+    cat "$NOTARY_LOG"
+    if grep -q "status: Accepted" "$NOTARY_LOG"; then
+      echo "  ✓ dmg notarization accepted"
+    else
+      echo "✗ dmg notarization failed or timed out — see log above."
+      SUBMISSION_ID="$(grep -m1 -E '^\s*id: ' "$NOTARY_LOG" | awk '{print $2}')"
+      if [[ -n "$SUBMISSION_ID" ]]; then
+        xcrun notarytool log "$SUBMISSION_ID" \
+          --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" || true
+      fi
+      rm -f "$NOTARY_LOG"
+      exit 1
+    fi
+    rm -f "$NOTARY_LOG"
+    echo "→ Stapling ticket to the dmg..."
+    xcrun stapler staple "$DMG"
+  fi
+  echo "→ Verifying notarization staple..."
+  if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    echo "  ✓ dmg is stapled and notarized"
+  else
+    echo "✗ stapler validate failed on the dmg — refusing to ship an artefact Gatekeeper will reject."
+    exit 1
+  fi
+  # Gatekeeper's own verdict on the container, exactly what a download sees.
+  if spctl -a -t open --context context:primary-signature -v "$DMG" 2>&1 | grep -q "accepted"; then
+    echo "  ✓ Gatekeeper accepts the dmg (source=Notarized Developer ID)"
+  else
+    echo "  ⚠️  spctl did not accept the dmg:"
+    spctl -a -t open --context context:primary-signature -v "$DMG" 2>&1 | sed 's/^/     /' || true
+  fi
+fi
+
+# Stapling rewrites the dmg, so the hash the Cask pins must be taken now.
+SHA256=$(shasum -a 256 "$DMG" | awk '{print $1}')
+echo "→ sha256 (final): $SHA256"
 
 # ── Step 3: update local Casks/jdf.rb (canonical) and mirror to tap ────────
 # `Casks/jdf.rb` in this repo is the source of truth. We sed in the new

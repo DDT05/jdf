@@ -16,8 +16,8 @@ JDF runs in three places:
 | Surface | What it is | Install |
 |---|---|---|
 | **JDF Reader** | Native desktop app — read, edit, import PDF/MD, export PDF | macOS: `brew tap uurtech/jdf && brew install jdf` · Windows: `winget install UurTech.JDFReader` |
-| **jdf.js** | JavaScript library — embed `.jdf` files on any web page | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.1.21">` |
-| **`@uurtech/jdf-cli`** | CLI — validate, convert PDF→JDF, wrap LLM JSON output into JDF | `npx @uurtech/jdf-cli import paper.pdf` |
+| **jdf.js** | JavaScript library — embed `.jdf` files on any web page | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.2.3">` |
+| **`@uurtech/jdf-cli`** | CLI — validate, convert PDF/JSON/MD→JDF, and RAG-native `chunk` + `embed` | `brew tap uurtech/jdf && brew install jdf-cli`, `npm i -g @uurtech/jdf-cli`, or `npx @uurtech/jdf-cli convert paper.pdf` |
 
 ## Why JDF
 
@@ -81,6 +81,8 @@ brew upgrade --cask jdf
 
 The Cask formula lives in a separate tap repo: [`uurtech/homebrew-jdf/Casks/jdf.rb`](https://github.com/uurtech/homebrew-jdf/blob/main/Casks/jdf.rb). A reference copy is also kept in this repo at [`Casks/jdf.rb`](Casks/jdf.rb).
 
+The **CLI** ships through the same tap as a Homebrew Formula (`brew tap uurtech/jdf && brew install jdf-cli`), so you can grab it without Node/npm — the canonical recipe is [`Formula/jdf-cli.rb`](Formula/jdf-cli.rb), mirrored into the tap on every release.
+
 ### Desktop · Windows
 
 ```powershell
@@ -104,8 +106,8 @@ Download `.deb`, `.AppImage`, or `.rpm` from the [latest release](https://github
 Embed JDF documents on any web page with one tag:
 
 ```html
-<link rel="stylesheet" href="https://unpkg.com/@uurtech/jdf@0.1.21/dist/jdfjs.css">
-<script type="module" src="https://unpkg.com/@uurtech/jdf@0.1.21"></script>
+<link rel="stylesheet" href="https://unpkg.com/@uurtech/jdf@0.2.3/dist/jdfjs.css">
+<script type="module" src="https://unpkg.com/@uurtech/jdf@0.2.3"></script>
 
 <jdf src="/whitepaper.jdf"></jdf>
 ```
@@ -172,6 +174,7 @@ All three renderers walk the same JSON. The desktop Reader and jdf.js are kept a
 | `text` element (heading 1-6, align, link, tocEntry, style) | ✓ | ✓ | — |
 | `richtext` element (per-run bold/italic/underline/strikethrough/color/font/link) | ✓ | ✓ | — |
 | `image` element (base64 resource OR src URL/path; `fit` modes) | ✓ | ✓ | — |
+| `video` element (bundled `.jdfx` asset OR src URL; poster, controls, autoplay/loop/muted; PDF export draws a poster placeholder) | ✓ | ✓ | — |
 | `table` element (headers, colspan/rowspan, alternating rows, borders, column align) | ✓ | ✓ | — |
 | `list` element (ordered/unordered, nested with per-item type override) | ✓ | ✓ | — |
 | `shape` element (rect, circle, ellipse, line, SVG path; fill/stroke/opacity) | ✓ | ✓ | — |
@@ -213,9 +216,9 @@ Editing lives in the desktop Reader only — jdf.js is a viewer, the CLI is non-
 | Capability | JDF Reader | jdf.js | CLI |
 |---|:---:|:---:|:---:|
 | Open `.jdf` from disk | ✓ | ✓ (via `<jdf src>` / `embed()`) | ✓ (`validate`) |
-| Import `.md` → `.jdf` | ✓ | — | ✓ (`jdf import file.md`) |
-| Import `.pdf` → `.jdf` (full fidelity: positions, fonts, colors, shapes, embedded images) | ✓ | — | ✓ (`jdf import file.pdf`) — same algorithm via `@jdf/pdf-import` |
-| Wrap raw / LLM JSON → validated `.jdf` | — | — | ✓ (`jdf import file.json`) — full doc, element array, or `{ pages: [...] }` partial |
+| Import `.md` → `.jdf` | ✓ | — | ✓ (`jdf convert file.md`) |
+| Import `.pdf` → `.jdf` (full fidelity: positions, fonts, colors, shapes, embedded images) | ✓ | — | ✓ (`jdf convert file.pdf`) — same algorithm via `@jdf/pdf-import` |
+| Wrap raw / LLM JSON → validated `.jdf` | — | — | ✓ (`jdf convert file.json`) — full doc, element array, or `{ pages: [...] }` partial |
 | JSON Schema validation | ✓ (live, in-app) | — | ✓ (`jdf validate file.jdf`) |
 | Markdown viewer (native render, no conversion) | ✓ | — | — |
 
@@ -234,8 +237,8 @@ Editing lives in the desktop Reader only — jdf.js is a viewer, the CLI is non-
 | **JDF Reader** (macOS) | `brew tap uurtech/jdf && brew install jdf` — DMG / `.app`, signed via GitHub release |
 | **JDF Reader** (Windows) | `winget install UurTech.JDFReader` or `.exe` / `.msi` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
 | **JDF Reader** (Linux) | `.deb` / `.AppImage` / `.rpm` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
-| **jdf.js** | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.1.21">` |
-| **`@uurtech/jdf-cli`** | `npx @uurtech/jdf-cli validate file.jdf` (no install) |
+| **jdf.js** | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.2.3">` |
+| **`@uurtech/jdf-cli`** | `brew tap uurtech/jdf && brew install jdf-cli`, `npm i -g @uurtech/jdf-cli`, or `npx @uurtech/jdf-cli validate file.jdf` (no install) |
 
 ## Page model
 
@@ -251,11 +254,24 @@ The same algorithm runs from the CLI for unattended pipelines:
 
 ```bash
 # headless conversion — RAG ingestion, CI gate, build step
-jdf import contract.pdf -o contract.jdf --json
+jdf convert contract.pdf -o contract.jdf --json
 jdf validate contract.jdf      # exit 1 on schema failure → CI fails the build
 ```
 
 Both the desktop reader and the CLI import `@jdf/pdf-import` from `packages/jdf-pdf-import/` — there's a single algorithm. Reader uses the browser entry point (DOM canvas, real Web Worker); the CLI uses the node entry point (`@napi-rs/canvas`, in-process). Output is bit-identical for the same PDF.
+
+What the importer understands (all built on Mozilla's PDF.js, the same engine behind Firefox's viewer):
+
+- **Text** with position, font family, size, bold/italic, colour and opacity. Colours are resolved by matching each text item to the operator that painted it, so PDFs where PDF.js merges runs keep the right colour per word.
+- **Form XObjects** (logos, headers, anything placed with `Do`) and their `/Matrix`, so nested content lands where the PDF put it.
+- **Images**: XObjects, repeated XObjects, inline images (`BI … EI`) and 1-bit stencil masks painted in the current fill colour. One shared resource per distinct image, however many pages reuse it.
+- **Vector shapes**: rects, lines, Bezier paths, fills, strokes, opacity. Gradient (axial/radial) fills become their average colour.
+- **Links**: external URLs and internal destinations (→ `#page-N`), matched to the text under them.
+- **Bookmarks/outline** → headings with `tocEntry`/`tocLevel`, so the reader sidebar, jdf.js TOC and `jdf chunk --strategy section` follow the author's structure.
+- **AcroForm widgets** → real `input` / `textarea` / `checkbox` / `select` / `signature` elements with their current values.
+- **Document info** → `meta.author`, `created`, `modified`, `keywords`, `language`.
+- **Encrypted PDFs** — `--password` on the CLI, a password prompt in the reader.
+- **Scanned PDFs** — the page image is kept, and the invisible OCR text layer is preserved with `opacity: 0` (searchable, chunkable, invisible), unless `--drop-invisible-text`.
 
 Per text run, the importer extracts:
 - **position** (mm) — via PDF.js `viewport.convertToViewportPoint`, accounting for rotation, CropBox, and MediaBox offset.
@@ -286,7 +302,7 @@ Round-trip back to `.pdf` via the toolbar (or `Cmd+Shift+E`). Respects:
 
 `.md` opens with a continuous-scroll, GitHub-style render (`marked`, full GFM: tables, blockquotes, code, links, images, task lists, hr, strikethrough). Toolbar toggle flips to the paged JDF render of the same content. `Cmd+F` highlights matches inline with `<mark>` tags in the live MD output, line-by-line.
 
-**Images in Markdown** — `![alt](path/to/picture.png)` works with relative paths (`komojam_target_architecture.drawio.png`), absolute paths, and `http(s)://` URLs. On import the relative ones are read from disk and base64-embedded into the document so the resulting `.jdf` is self-contained and portable. Both the JDF Reader app and the CLI (`jdf import file.md`) follow the same rule.
+**Images in Markdown** — `![alt](path/to/picture.png)` works with relative paths (`komojam_target_architecture.drawio.png`), absolute paths, and `http(s)://` URLs. On import the relative ones are read from disk and base64-embedded into the document so the resulting `.jdf` is self-contained and portable. Both the JDF Reader app and the CLI (`jdf convert file.md`) follow the same rule.
 
 ## Images & assets — `.jdf` vs `.jdfx`
 
@@ -328,7 +344,7 @@ hello.jdfx                  (zip)
 
 1. Relative paths are resolved against the Markdown file's directory and read from disk.
 2. Bytes get embedded into the document.
-3. If at least one image was embedded, the importer writes a `.jdfx`; otherwise a plain `.jdf`. Same rule in the desktop reader and `jdf import file.md`.
+3. If at least one image was embedded, the importer writes a `.jdfx`; otherwise a plain `.jdf`. Same rule in the desktop reader and `jdf convert file.md`.
 
 ## RAG / AI ingestion
 
@@ -341,10 +357,60 @@ JDF removes most of the work a typical retrieval-augmented-generation pipeline d
 | **Metadata** | Synthesized after the fact (page number, "is this a heading?") and often wrong | First-class on every element: `type`, `heading`, page index, position, link target |
 | **Embedding noise** | Repeated page headers / footers / page numbers leak into chunks | `header` and `footer` live in their own tree, never in content chunks |
 | **Re-indexing on edit** | Re-parse + re-chunk + re-embed the whole PDF | Diff the JSON, re-embed only the changed elements |
-| **Tables** | Cells smear across columns; multi-row headers collapse | `{ headers: [...], rows: [[...]] }` — every cell at its real coordinate |
+| **Tables** | Cells smear across columns; multi-row headers collapse | `{ headers: [...], rows: [[...]] }` — every cell at its real coordinate. `jdf convert file.pdf` rebuilds tables from PDF geometry into real `table` elements (120/120 on the benchmark corpus, 99.3% cells exact) |
 | **Images** | Dropped or stubbed as `[image]` | Stored in `resources.images` with alt text and an anchor element — a vision step can fetch the image at the exact retrieval point |
 
-> **Benchmarks coming.** The wins above are *structural* — pipeline stages JDF removes entirely — not measured timings. We're running benchmarks on a public corpus (academic PDFs, financial filings, scanned reports) covering parse, chunk, embed, and retrieval cost; this section will be updated with the numbers as soon as they're ready. Real-world speedup depends on your PDFs (text-only vs. scanned), parser, and chunker — if you run a comparison on your own corpus first, please [open an issue](https://github.com/uurtech/jdf/issues) with the methodology and we'll include it.
+### Benchmark — measured, not claimed
+
+Same 24 multi-page reports, two ways in: as **PDF** (printed by a real browser from the JDF originals, so the content is identical) through the usual Python parsers + LangChain-style fixed chunking, and as **JDF** through `jdf chunk`. Same local embedding models, same BM25, same 192 questions with known answers, same hit rule (right document *and* the chunk contains the answer together with its row/subject key). Higher is better.
+
+<!-- bench:results:start -->
+| Pipeline | Chunks | BM25 (lexical) R@1k tok | nomic-embed-text R@1k tok | bge-small R@1k tok | MiniLM-L6-v2 R@1k tok | bge-base R@1k tok | nomic-embed-text top-1 | Ctx tokens @5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **JDF · jdf chunk (section, 512 tok)** | 192 | **100.0%** | **99.0%** | **96.9%** | **97.4%** | **96.9%** | **76.6%** | 753 |
+| *PDF → jdf convert → jdf chunk (section, 512 tok)* | 216 | *100.0%* | *99.0%* | *95.8%* | *96.4%* | *99.5%* | *80.2%* | 718 |
+| PDF · PyMuPDF get_text() · fixed 1000/200 | 153 | 98.4% | 81.8% | 74.5% | 70.3% | 78.6% | 41.7% | 1,226 |
+| PDF · PyMuPDF get_text() · fixed 2000/200 | 90 | 97.9% | 77.1% | 64.1% | 60.9% | 56.8% | 63.0% | 1,781 |
+| PDF · pdfplumber extract_text() · fixed 1000/200 | 150 | 99.5% | 80.7% | 75.0% | 65.6% | 80.2% | 42.2% | 1,219 |
+| PDF · pdfplumber extract_text() · fixed 2000/200 | 90 | 97.9% | 77.1% | 66.1% | 61.5% | 57.8% | 63.5% | 1,773 |
+| PDF · pypdf extract_text() · fixed 1000/200 | 151 | 99.5% | 83.3% | 75.0% | 66.7% | 77.6% | 41.1% | 1,224 |
+| PDF · pypdf extract_text() · fixed 2000/200 | 90 | 97.9% | 77.1% | 66.1% | 62.5% | 57.3% | 63.0% | 1,774 |
+| PDF · pdftotext -layout (poppler) · fixed 1000/200 | 268 | 85.9% | 71.9% | 66.7% | 66.1% | 74.0% | 35.9% | 1,040 |
+| PDF · pdftotext -layout (poppler) · fixed 2000/200 | 96 | 92.7% | 62.0% | 48.4% | 54.2% | 44.8% | 46.4% | 2,269 |
+
+R@1k tok = answer found within the first 1,000 tokens of retrieved context (chunk-size neutral). 24 documents / 120 pages / 192 questions. All embeddings local. Editing one paragraph re-embeds **1 of 192** JDF chunks; a PDF pipeline re-embeds the whole document. Apple M5, 2026-09-18. Full tables incl. top-1/top-5/MRR per model: [`bench/results/report.md`](bench/results/report.md).
+<!-- bench:results:end -->
+
+**RAG cost — 1,000 PDF files vs 1,000 JDF files.** Same pipeline, only the input format differs: chunks → embeddings → vector store → top-5 context → LLM. Tokens counted from the chunks each pipeline produces, dollars from published prices (`bench/prices.json`); the benchmark never calls a paid API.
+
+<!-- bench:cost:start -->
+| Per 1,000 documents | JDF · jdf chunk (section) | PDF · pypdf extract_text() · fixed 1000/200 |
+|---|---:|---:|
+| Accuracy · answer in first 1,000 tokens (nomic-embed-text) | **99.0%** | 83.3% |
+| Accuracy · top-1 hit | **76.6%** | 41.1% |
+| Chunks | **8,000** | 6,291 |
+| Embedding tokens, initial index | **1,305,820** | 1,390,646 |
+| Embedding cost · OpenAI text-embedding-3-small | **$0.0261** | $0.0278 |
+| Local embedding time · bge-small-en-v1.5 (measured throughput) | **40.5 s** | 33.6 s |
+| Vector-store payload | **5.8 MB** | 5.6 MB |
+| Re-embed tokens when one paragraph changes in every document | **91,000** | 1,461,000 |
+| Re-index cost · OpenAI text-embedding-3-small | **$0.0018** | $0.0292 |
+| LLM input tokens per 1,000,000 queries (top-5 context) | **753,364,583** | 1,223,625,000 |
+| LLM input cost · Claude Sonnet 5 input | **$1,506.73** | $2,447.25 |
+
+1,000 files per format (24-document corpus cycled); tokens counted from each pipeline's chunks, embedding time measured on Apple M5, 2026-09-18. Other volumes (10,000 documents, 10M queries) are linear estimates, not measurements. Prices: [`bench/prices.json`](bench/prices.json). Method: [`bench/README.md`](bench/README.md).
+<!-- bench:cost:end -->
+
+Reproduce it — Python only, no Node toolchain:
+
+```bash
+cd bench && pip install -r requirements.txt
+python rag_bench.py            # accuracy (BM25 + local embeddings; --embedder none for BM25 only)
+python cost_bench.py           # RAG cost at 1,000 files per format
+python rag_bench.py --verify   # re-run and fail on any discrepancy with the published numbers
+```
+
+The corpus is synthetic on purpose — a retrieval benchmark needs ground truth for every question, which public PDF corpora don't provide; the generator, every document, every question and every retrieved rank are in [`bench/`](bench/README.md). Full write-up: [docs/benchmark](https://uurtech.github.io/jdf/docs/benchmark.html). If you run the pipelines on your own corpus, please [open an issue](https://github.com/uurtech/jdf/issues) with the numbers.
 
 A minimal RAG ingestor for JDF is a single loop — no PDF library, no layout heuristics, no chunker config:
 
@@ -404,7 +470,22 @@ See [`docs/docs/why-ai.html`](docs/docs/why-ai.html) for the long-form discussio
 
 Positions in mm (default), font sizes in pt. A4 content area: 166 × 247 mm with the default 22 / 25 mm margins.
 
-Full schema: [`spec/jdf-schema.json`](spec/jdf-schema.json). Working example: [`spec/examples/hello-world.jdf`](spec/examples/hello-world.jdf).
+### Flow layout & auto-pagination
+
+Set `"flow": true` on a page (or `meta.flow` for the whole document) and you no longer pin every element's `position.y` by hand. In flow mode the PDF exporter lays elements out top-to-bottom, word-wraps long text inside the content width, and breaks any overflow onto a fresh page instead of clipping it. Leave `flow` unset (the default) and authored positions are honoured exactly as before — mix both across pages in one document.
+
+```json
+{
+  "pages": [
+    { "flow": true, "elements": [
+      { "type": "text", "content": "Title", "heading": 1, "width": 166 },
+      { "type": "text", "content": "A long paragraph that wraps and paginates automatically…", "width": 166 }
+    ] }
+  ]
+}
+```
+
+Full schema: [`spec/jdf-schema.json`](spec/jdf-schema.json). Working examples: [`spec/examples/hello-world.jdf`](spec/examples/hello-world.jdf) (absolute layout) and [`spec/examples/flow-report.jdf`](spec/examples/flow-report.jdf) (flow + auto-pagination).
 
 Internal navigation: `link: "#page-3"` or `link: { type: "internal", target: "#page-3" }` on text/richtext.
 
@@ -474,38 +555,134 @@ Full reference: [`jdfjs/README.md`](jdfjs/README.md) · [`docs/docs/embed/`](doc
 
 ## CLI
 
-The CLI is the bridge between **legacy documents** (PDFs everywhere) and **AI workflows** (LLMs emit JSON). Two paths matter:
+The CLI is the bridge between **legacy documents** (PDFs everywhere), **AI workflows** (LLMs emit JSON), and **RAG pipelines** (chunk + embed, incrementally):
 
 ```bash
 # run on demand (no install)
 npx @uurtech/jdf-cli validate doc.jdf
 
 # PDF → JDF — same algorithm the desktop reader uses, headless
-npx @uurtech/jdf-cli import paper.pdf -o paper.jdf --json
+npx @uurtech/jdf-cli convert paper.pdf -o paper.jdf --json
 
 # JSON → JDF — wrap raw JSON (LLM output, generated reports) into a validated doc
-npx @uurtech/jdf-cli import response.json -o response.jdf
+npx @uurtech/jdf-cli convert response.json -o response.jdf
 
 # Markdown → JDF (convenience)
-npx @uurtech/jdf-cli import README.md
+npx @uurtech/jdf-cli convert README.md
+
+# JDF → retrieval-ready chunks (offline, deterministic)
+npx @uurtech/jdf-cli chunk paper.jdf                 # → paper.chunks.jsonl
+
+# JDF → embeddings (local via Ollama by default; incremental)
+npx @uurtech/jdf-cli embed paper.jdf --incremental
 
 # or install globally
 npm install -g @uurtech/jdf-cli
 jdf validate doc.jdf
 ```
 
+### Commands
+
+| Command | What it does |
+|---|---|
+| `jdf validate <file>` | Validate a `.jdf` / `.jdfx` against the schema. Non-zero exit on failure. |
+| `jdf convert <file>` | PDF / JSON / Markdown → validated JDF. (alias: `import`) |
+| `jdf chunk <file>` | Split a JDF document into retrieval-ready chunks. Offline, deterministic. |
+| `jdf embed <file>` | Compute embeddings for the chunks. Local (Ollama) by default; incremental. |
+| `jdf transcribe <file>` | Attach a time-stamped transcript to a `video` element — import SRT/VTT/JSON, or run Whisper (local `whisper-cli` or OpenAI). Stored as text in the document; `jdf chunk` turns it into time-windowed chunks with `media: {element, t0, t1}`. |
+| `jdf describe <file>` | Give every image text RAG can use: OCR blocks (tesseract.js, local) + a caption (local Ollama vision model, or OpenAI). `jdf convert --ocr tesseract` does the same for scanned PDF pages. |
+| `jdf rag <dir>` | Whole folder → retrieval-ready: finds `.jdf`/`.jdfx`, transcribes videos and OCRs/captions images that lack text (when providers are given), chunks, embeds incrementally, writes `.jdf-rag/index.jsonl` + `manifest.json` with a media-coverage report; `--strict` fails if any image/video is still without text. Reads `jdf.rag.json` in the folder for defaults. |
+
 ### Why this CLI exists
 
-- **PDF → JDF for RAG / CI ingestion.** Pipelines that want structured documents stop fighting `pdfplumber` / `pymupdf` heuristics — `jdf import file.pdf --json` produces a tree your retriever can chunk by element type. The algorithm is shared with the desktop reader (`@jdf/pdf-import` package), so the CLI's output and the reader's output are bit-identical for the same input.
-- **JSON → JDF for AI agents.** Models naturally emit JSON. `jdf import response.json` accepts three shapes: a full JDF document (validated and optionally re-emitted), a bare element array (wrapped into a single-page A4 doc), or a `{ elements: [...] }` / `{ pages: [...] }` partial. The output is always validated against `spec/jdf-schema.json` — a non-zero exit makes it safe to drop into CI as a gate on model output.
-- **One file in, one renderable file out.** `validate` runs after every `import`, so if the JSON is malformed, the build breaks — there is no "shipping a broken document" path.
+- **PDF → JDF for RAG / CI ingestion.** Pipelines that want structured documents stop fighting `pdfplumber` / `pymupdf` heuristics — `jdf convert file.pdf --json` produces a tree your retriever can chunk by element type. The algorithm is shared with the desktop reader (`@jdf/pdf-import` package), so the CLI's output and the reader's output are bit-identical for the same input.
+- **JSON → JDF for AI agents.** Models naturally emit JSON. `jdf convert response.json` accepts three shapes: a full JDF document (validated and optionally re-emitted), a bare element array (wrapped into a single-page A4 doc), or a `{ elements: [...] }` / `{ pages: [...] }` partial. The output is always validated against `spec/jdf-schema.json` — a non-zero exit makes it safe to drop into CI as a gate on model output.
+- **JDF → chunks + embeddings for retrieval.** `jdf chunk` reads JDF's heading hierarchy and typed elements to produce section-aware chunks (tables serialized as `Header: value` rows, so column meaning survives). `jdf embed` turns those into vectors — **locally by default (Ollama, no data leaves your machine)** or via a remote API. Both are separate, opt-in steps: the converter never chunks or embeds, stays pure and offline.
+- **One file in, one renderable file out.** `validate` runs after every `convert`, so if the JSON is malformed, the build breaks — there is no "shipping a broken document" path.
 
 ### Flags
 
-| Flag | What it does |
+| Flag | Commands | What it does |
+|---|---|---|
+| `-o, --output <path>` | all | Explicit output path. For `convert`, the extension picks `.jdf` vs `.jdfx`. |
+| `--json` | convert | Force pure-JSON `.jdf` output even when the document carries images. |
+| `--password <pw>` | convert (pdf) | Open an encrypted PDF. The desktop reader asks interactively instead. |
+| `--drop-invisible-text` | convert (pdf) | Omit the invisible OCR layer of scanned PDFs. By default it is kept with `opacity: 0` so search / `chunk` / `embed` still see the words. |
+| `--strategy <s>` | chunk, embed | `section` (default) · `element` · `fixed`. |
+| `--format <f>` | chunk | `jsonl` (default) · `json` · `inline` (write an `index` block into the `.jdf`). |
+| `--max-tokens <n>` | chunk, embed | Soft cap per chunk (default 512). |
+| `--provider <p>` | embed | `ollama` (default, local) · `openai` (remote API). |
+| `--model <name>` | embed | Model id (default `nomic-embed-text` / `text-embedding-3-small`). |
+| `--incremental` | embed | Skip chunks whose content hash is unchanged — re-embed only what changed. |
+| `--cache <path>` | embed | Sidecar to reuse vectors from with `--incremental` (default: the output path itself). |
+| `--window <sec>` | chunk / embed / rag | Transcript window per video chunk (default 45 s; segments are never split). |
+| `--from <file>` | transcribe | Import subtitles (`.srt`, `.vtt`, JSON segments) — offline, no model. |
+| `--provider whisper-cli\|openai` | transcribe / rag | Run Whisper locally (whisper.cpp + ffmpeg) or via the OpenAI audio API (`OPENAI_API_KEY`). |
+| `--prompt <text>` | transcribe / rag | Whisper vocabulary hint (names, acronyms) — a spelling bias, not an instruction. |
+| `--chapters <file>` | transcribe | `[{t,title}]` JSON or `mm:ss Title` lines → chapter breadcrumbs. |
+| `--transcribe none\|whisper-cli\|openai` | rag | Transcribe videos that have no transcript yet (default `none` = count and report). |
+| `--ocr tesseract\|openai\|none` | describe / rag / convert | OCR images (or scanned PDF pages) that have no text yet. |
+| `--caption ollama\|openai\|none` · `--caption-model` | describe / rag | Vision caption for images without text (default local `qwen2.5vl:3b`). |
+| `--strict` | rag | Exit 1 when any image/video still has no text after the run. |
+| `--no-embed` · `--dry-run` · `--out <dir>` | rag | Chunk-only; preview; index folder (default `<dir>/.jdf-rag`). |
+
+### RAG ingestion, incrementally
+
+`jdf chunk` and `jdf embed` exist because JDF is diffable JSON with a real structure. Chunking is **deterministic** — same document + same options → byte-identical chunks and stable content hashes. That is what makes `--incremental` embedding work: edit one paragraph in a 500-page document and you re-embed one chunk, not five hundred.
+
+```bash
+# section-aware chunks, ready for any vector store
+jdf chunk report.jdf                      # → report.chunks.jsonl
+#   {"id":"p3e7","text":"…","path":["Report","Pricing"],"page":3,"types":["text","table"],"tokens":142,"hash":"ab12cd"}
+
+# embed locally (Ollama auto-starts via Docker if needed), skipping unchanged chunks
+jdf embed report.jdf --incremental        # → report.embeddings.json
+
+# or inline the chunk index into the document itself (renderers ignore it; still schema-valid)
+jdf chunk report.jdf --format inline
+```
+
+Embeddings are **cache, never source of truth** — delete and regenerate at will. The document `.jdf` stays pure; the RAG layer lives beside it.
+
+### Drop into an existing ingestion pipeline
+
+Teams that already run RAG have a script: sync a bucket, parse PDFs, chunk, embed, upsert. JDF is one stage in front of the embedder — the script and the vector store stay as they are.
+
+```bash
+aws s3 sync s3://corp-docs/policies ./policies
+npx @uurtech/jdf-cli rag ./policies --no-embed --ocr tesseract --strict
+#  → ./policies/.jdf-rag/index.jsonl    one JSON line per chunk, every file in the folder
+#  → ./policies/.jdf-rag/manifest.json  coverage report: images/videos with and without text
+```
+
+`index.jsonl` is the contract your code reads:
+
+| Field | Use it for |
 |---|---|
-| `-o, --output <path>` | Explicit output path. Extension picks `.jdf` (single JSON file) vs `.jdfx` (zip bundle for documents with embedded assets). |
-| `--json` | Force pure-JSON `.jdf` output even when the document carries images. RAG pipelines and CI consumers that prefer one text file over a zip should turn this on. |
+| `text` | what the LLM should see (tables serialised as `Header: value \| …`, transcript windows as `[mm:ss–mm:ss] …`) |
+| `path` | heading breadcrumb — metadata filter in the vector store |
+| `page`, `media {element,t0,t1}` | jump to the page / video timestamp of a hit (`viewer.seek`) |
+| `hash` | skip unchanged chunks on the next run (content hash, deterministic) |
+| `file`, `id`, `types`, `tokens` | provenance, element types, context budgeting |
+
+Embedding stays wherever it is today (`jdf embed` is optional). `--strict` makes the stage fail the job when any image or video would enter the index without text. Real-corpus numbers for this path — public PDFs, same retrievers as the main benchmark, re-runnable on your own folder with `python bench/byoc.py --pdf DIR`:
+
+<!-- bench:byoc:start -->
+| Pipeline | Chunks | BM25 R@1k tok | nomic-embed-text R@1k tok | nomic-embed-text top-1 | Ctx tokens @5 |
+|---|---:|---:|---:|---:|---:|
+| **PDF → jdf convert → jdf chunk (section, 512 tok)** | 570 | **94.5%** | **64.8%** | **54.7%** | 2047 |
+| **PDF → jdf convert → jdf chunk (section, 256 tok)** | 871 | **96.9%** | **80.5%** | **57.0%** | 1075 |
+| PDF · PyMuPDF get_text() · fixed 1000/200 | 856 | 97.7% | 78.9% | 57.8% | 1210 |
+| PDF · PyMuPDF get_text() · fixed 2000/200 | 393 | 97.7% | 64.1% | 50.0% | 2373 |
+| PDF · pdfplumber extract_text() · fixed 1000/200 | 843 | 82.0% | 77.3% | 57.0% | 1196 |
+| PDF · pdfplumber extract_text() · fixed 2000/200 | 386 | 80.5% | 63.3% | 43.0% | 2356 |
+| PDF · pypdf extract_text() · fixed 1000/200 | 854 | 97.7% | 81.2% | 56.2% | 1207 |
+| PDF · pypdf extract_text() · fixed 2000/200 | 391 | 96.9% | 60.2% | 44.5% | 2389 |
+| PDF · pdftotext -layout (poppler) · fixed 1000/200 | 1098 | 96.1% | 80.5% | 61.7% | 1119 |
+| PDF · pdftotext -layout (poppler) · fixed 2000/200 | 460 | 98.4% | 67.2% | 56.2% | 2267 |
+
+Real public PDFs — [BERT: Pre-training of Deep Bidirectional Transformers](https://arxiv.org/pdf/1810.04805), [Attention Is All You Need](https://arxiv.org/pdf/1706.03762), [Overview of Amazon Web Services](https://docs.aws.amazon.com/pdfs/whitepapers/latest/aws-overview/aws-overview.pdf), [Serverless Applications Lens](https://docs.aws.amazon.com/pdfs/wellarchitected/latest/serverless-applications-lens/wellarchitected-serverless-applications-lens.pdf) (297 pages) — with 128 numeric-fact questions derived from the documents themselves (see `bench/byoc.py`; unsupervised, so absolute numbers are lower than the labelled benchmark and both sides share the noise). JDF side = `jdf convert` + `jdf chunk` 0.2.2, the same code the CLI and reader ship. Apple M5, 2026-09-18. Re-run: `python bench/byoc.py --embedder ollama:nomic-embed-text`; your own folder: `--pdf DIR`.
+<!-- bench:byoc:end -->
 
 ### CI gate
 
@@ -513,7 +690,7 @@ jdf validate doc.jdf
 # .github/workflows/docs.yml
 - name: Validate model-emitted document
   run: |
-    npx @uurtech/jdf-cli import dist/output.json -o dist/output.jdf
+    npx @uurtech/jdf-cli convert dist/output.json -o dist/output.jdf
     npx @uurtech/jdf-cli validate dist/output.jdf
 ```
 
@@ -580,7 +757,7 @@ const blob = viewer.exportJdf();
 
 ### PDF AcroForm import
 
-`jdf import existing-form.pdf` walks the PDF's AcroForm widget annotations and emits matching JDF form elements:
+`jdf convert existing-form.pdf` walks the PDF's AcroForm widget annotations and emits matching JDF form elements:
 
 | PDF field type | JDF element |
 |---|---|
@@ -656,9 +833,10 @@ Done:
 - JSON Schema, CLI validate, CI on all three OSes.
 - Homebrew tap (`uurtech/jdf`).
 - **jdf.js — web embed library** with auto-init, single `<jdf src="...">` form, feature parity with the desktop renderer.
-- Published to npm as [`@uurtech/jdf`](https://www.npmjs.com/package/@uurtech/jdf) — install via `npm install @uurtech/jdf` or load from CDN at `https://unpkg.com/@uurtech/jdf@0.1.21` (always pin a version in production).
+- Published to npm as [`@uurtech/jdf`](https://www.npmjs.com/package/@uurtech/jdf) — install via `npm install @uurtech/jdf` or load from CDN at `https://unpkg.com/@uurtech/jdf@0.2.3` (always pin a version in production).
 - **`.jdfx` zip bundles** — automatic for documents with embedded images/fonts. Reader, jdf.js, and CLI all read and write the format; manifest schema at [`spec/jdfx-manifest-schema.json`](spec/jdfx-manifest-schema.json).
-- **Markdown image imports** — `![alt](relative.png)` works in both the desktop importer and `jdf import file.md`. Relative paths are resolved against the source file's directory and embedded into the output bundle.
+- **Markdown image imports** — `![alt](relative.png)` works in both the desktop importer and `jdf convert file.md`. Relative paths are resolved against the source file's directory and embedded into the output bundle.
+- **RAG tooling in the CLI** — `jdf chunk` (deterministic, section-aware, offline) and `jdf embed` (local via Ollama or remote via OpenAI, with `--incremental` re-embedding). Tables serialize as `Header: value` rows; chunk index can be inlined into the `.jdf`.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the per-release log.
 
@@ -668,19 +846,17 @@ The next surface area, grouped by theme. Items at the top of each group are sche
 
 ### RAG / AI tooling
 
-- **Public benchmark suite** — parse / chunk / embed / retrieval cost measured on a shared corpus (academic PDFs, financial filings, scanned reports). Results published at `docs/docs/benchmarks.html` and linked from the RAG section. Backs the structural claims in [`docs/docs/why-ai.html`](docs/docs/why-ai.html) with real numbers.
-- **`@uurtech/jdf-rag`** — RAG-ready ingestor as a published package. One import gives you an iterator of typed chunks (`text` / `richtext` / `table` / `list` / `image`) each carrying first-class metadata (page index, type, heading level, link target). No PDF library, no chunker config.
+- **Benchmark on real-world corpora** — the shipped benchmark (`bench/`) uses a generated corpus so every answer location is known; next is a second suite on public PDFs (academic papers, financial filings, scanned reports) with LLM-judged answers, plus a hosted results page.
+- **`@uurtech/jdf-rag`** — the CLI's `chunk` / `embed` logic as a published library (programmatic `chunkDocument()` / `embedDocument()`), so an ingestor can call it in-process instead of shelling out. The CLI commands already ship today; this packages them for embedding in apps.
 - **`@uurtech/jdf-llm`** — structured-output helpers for the major LLM APIs (OpenAI `response_format`, Anthropic `tools`, Google `responseSchema`). Ships the JDF JSON Schema as a guaranteed-valid generation target plus prompt scaffolding for "produce a one-page report" workflows.
 
 ### CLI parity with the desktop reader
 
-- **`jdf import file.pdf`** — full PDF import in the CLI. Extract the existing browser importer (`apps/reader/src/import/pdfToJdf.ts`) into `packages/jdf-pdf-import/` with two entry points: `browser.ts` (canvas) and `node.ts` (`node-canvas`). Desktop and CLI consume the same algorithm — no duplication.
-- **`jdf export file.jdf -o file.pdf`** — PDF export in the CLI. Wraps the Rust exporter as a standalone binary or ports it to JS.
+- **`jdf export file.jdf -o file.pdf`** — PDF export in the CLI. Wraps the Rust exporter as a standalone binary or ports it to JS. (PDF import, chunk, and embed already ship in the CLI.)
 
 ### Rendering & import quality
 
 - **PDF table detection** — geometry-based row/column grouping during PDF import. Today the importer emits cells as positioned `text` elements; this pass groups them into real `table` elements with `headers` + `rows`. The single biggest fidelity win for RAG retrieval and export round-trips.
-- **Multi-page overflow on PDF export** — content longer than the page flows to page N+1 instead of being clipped. Currently the exporter assumes one logical page per `page` entry.
 - **Editing in jdf.js** — opt-in editor mode (`<jdf src="..." editable>`) that mirrors the desktop reader's inline editing, hover action bar, and `Cmd+S` save. Today jdf.js is strictly a renderer.
 
 ### Editor & ecosystem
@@ -743,10 +919,16 @@ Thanks to everyone who has helped shape JDF — code, design, docs, feedback.
         <sub><b>EienMosu</b></sub>
       </a>
     </td>
+    <td align="center">
+      <a href="https://github.com/nanda1505" title="nanda1505">
+        <img src="https://images.weserv.nl/?url=avatars.githubusercontent.com/u/7380934&w=72&h=72&mask=circle&fit=cover" width="72" height="72" alt="nanda1505" /><br />
+        <sub><b>nanda1505</b></sub>
+      </a>
+    </td>
   </tr>
 </table>
 
-[@uurtech](https://github.com/uurtech) · [@feyzademirel](https://github.com/feyzademirel) · [@rcpzen](https://github.com/rcpzen) · [@uguracikgoz](https://github.com/uguracikgoz) · [@EienMosu](https://github.com/EienMosu)
+[@uurtech](https://github.com/uurtech) · [@feyzademirel](https://github.com/feyzademirel) · [@rcpzen](https://github.com/rcpzen) · [@uguracikgoz](https://github.com/uguracikgoz) · [@EienMosu](https://github.com/EienMosu) · [@nanda1505](https://github.com/nanda1505)
 
 ## License
 

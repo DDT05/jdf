@@ -13,8 +13,15 @@ const ITEMS: { type: Element["type"]; label: string; icon: string }[] = [
   { type: "table", label: "Table", icon: "⊞" },
   { type: "shape", label: "Shape", icon: "▢" },
   { type: "image", label: "Image", icon: "🖼" },
+  { type: "video", label: "Video", icon: "▶" },
   { type: "collapsible", label: "Section", icon: "▶" },
   { type: "toc", label: "TOC", icon: "≣" },
+  // JDF Forms — the reader must be able to author every element jdf.js can fill.
+  { type: "input", label: "Input", icon: "▭" },
+  { type: "textarea", label: "Textarea", icon: "▤" },
+  { type: "checkbox", label: "Checkbox", icon: "☑" },
+  { type: "select", label: "Select", icon: "⌄" },
+  { type: "signature", label: "Signature", icon: "✍" },
 ];
 
 export function InsertBar(props: InsertBarProps) {

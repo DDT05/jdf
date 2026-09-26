@@ -52,6 +52,13 @@ export interface JDFViewerInstance {
   getCurrentPage: () => number;
   /** Replace the document */
   setDocument: (doc: JdfDocument) => void;
+  /**
+   * Jump to a moment in a video element and start playing — the retrieval-side
+   * counterpart of `jdf chunk`'s `media: { element, t0 }`. `elementId` is the
+   * video element's `id`; `seconds` the offset. Scrolls the page into view.
+   * Returns false when no such video exists.
+   */
+  seek: (elementId: string, seconds: number) => boolean;
   /** Tear down — removes DOM and event listeners */
   destroy: () => void;
   /**
@@ -175,6 +182,13 @@ export class JDFViewer {
   // Window resize fallback for fit-width / fit-page when the host element's
   // own size doesn't change but the viewport's does (flex re-layout, etc).
   private windowResizeListener: (() => void) | null = null;
+  // Zoom the host asked for (option or toolbar). In "manual" fit mode the
+  // effective zoom is capped so a page never renders wider than its
+  // container — a 794 px A4 page inside a 390 px phone viewport used to be
+  // cut in half with a sideways scroll. Once the user zooms by hand we stop
+  // capping and let them scroll.
+  private requestedZoom = 1;
+  private userZoomed = false;
 
   constructor(container: HTMLElement, doc: JdfDocument, options: JDFViewerOptions = {}) {
     this.container = container;
@@ -189,6 +203,7 @@ export class JDFViewer {
       ...options,
     };
     this.zoom = this.options.zoom;
+    this.requestedZoom = this.options.zoom;
     this.currentPage = this.options.initialPage;
     this.applyContainerSize();
     this.mount();
@@ -293,9 +308,8 @@ export class JDFViewer {
     this.darkModeListener = listener;
   }
 
-  /** Auto-zoom for fit modes. */
+  /** Auto-zoom for fit modes (and the responsive cap in manual mode). */
   private applyFit() {
-    if (this.options.fit === "manual") return;
     const firstPage = this.pagesEl.querySelector<HTMLElement>(".jdfjs-page");
     if (!firstPage) return;
     // Read intrinsic page size from the inline width/min-height in px (set in renderPage)
@@ -304,6 +318,17 @@ export class JDFViewer {
     if (!pageWidth || !pageHeight) return;
     const containerWidth = this.pagesEl.clientWidth - 32; // margin
     const containerHeight = this.pagesEl.clientHeight - 32;
+    if (this.options.fit === "manual") {
+      if (containerWidth <= 0) return;
+      const maxFit = containerWidth / pageWidth;
+      const next = this.userZoomed ? this.zoom : Math.min(this.requestedZoom, maxFit);
+      if (Math.abs(next - this.zoom) > 0.001 || firstPage.style.transformOrigin !== "top left") {
+        this.zoom = Math.max(0.25, Math.min(3, next));
+        this.applyZoom();
+        this.updateIndicators();
+      }
+      return;
+    }
     if (this.options.fit === "fit-width") {
       this.zoom = Math.max(0.25, Math.min(3, containerWidth / pageWidth));
     } else if (this.options.fit === "fit-page") {
@@ -380,6 +405,19 @@ export class JDFViewer {
     this.applyZoom();
   }
 
+  /** Seek a video element (by its `id`) to `seconds` and play; scrolls it into view. */
+  seek(elementId: string, seconds: number): boolean {
+    const video = this.pagesEl.querySelector<HTMLVideoElement>(`video[data-jdf-video="${elementId.replace(/"/g, '\\"')}"]`);
+    if (!video) return false;
+    const pageWrap = video.closest<HTMLElement>(".jdfjs-page-wrapper");
+    const idx = pageWrap ? Number(pageWrap.getAttribute("data-page-index")) : NaN;
+    if (!Number.isNaN(idx)) this.goToPage(idx);
+    video.scrollIntoView({ block: "center" });
+    const go = () => { video.currentTime = Math.max(0, seconds); video.play().catch(() => { /* autoplay policy — user can press play */ }); };
+    if (video.readyState >= 1) go(); else video.addEventListener("loadedmetadata", go, { once: true });
+    return true;
+  }
+
   private renderPage(page: Page, pageIndex: number, styles: Record<string, Style>): HTMLDivElement {
     const dim = getPageDimensions(
       page.pageSize ?? this.doc.meta?.pageSize ?? "A4",
@@ -403,7 +441,8 @@ export class JDFViewer {
     const footerH = footer?.height ?? 0;
 
     if (header) {
-      const h = this.renderHeaderFooter(header, pageIndex, this.doc.pages.length, styles);
+      const headerPath: (string | number)[] = page.header ? ["pages", pageIndex, "header"] : ["header"];
+      const h = this.renderHeaderFooter(header, pageIndex, this.doc.pages.length, styles, headerPath);
       h.classList.add("jdfjs-header");
       h.style.paddingTop = `${unitToPx(margins.top! / 2)}px`;
       h.style.paddingLeft = `${unitToPx(margins.left!)}px`;
@@ -438,7 +477,8 @@ export class JDFViewer {
     pageEl.appendChild(content);
 
     if (footer) {
-      const f = this.renderHeaderFooter(footer, pageIndex, this.doc.pages.length, styles);
+      const footerPath: (string | number)[] = page.footer ? ["pages", pageIndex, "footer"] : ["footer"];
+      const f = this.renderHeaderFooter(footer, pageIndex, this.doc.pages.length, styles, footerPath);
       f.classList.add("jdfjs-footer");
       f.style.paddingBottom = `${unitToPx(margins.bottom! / 2)}px`;
       f.style.paddingLeft = `${unitToPx(margins.left!)}px`;
@@ -450,7 +490,7 @@ export class JDFViewer {
     return wrapper;
   }
 
-  private renderHeaderFooter(hf: HeaderFooter, pageIndex: number, totalPages: number, styles: Record<string, Style>): HTMLDivElement {
+  private renderHeaderFooter(hf: HeaderFooter, pageIndex: number, totalPages: number, styles: Record<string, Style>, basePath: (string | number)[]): HTMLDivElement {
     const div = document.createElement("div");
     if (hf.elements?.length) {
       hf.elements.forEach((el, idx) => {
@@ -458,8 +498,12 @@ export class JDFViewer {
           styles,
           resources: this.doc.resources,
           document: this.doc,
-          path: ["__hf__", pageIndex, idx],
+          // Real doc path so form-field mutations land on the right node and
+          // survive exportJdf (was a synthetic ["__hf__", …] that
+          // handleFormChange could not resolve).
+          path: [...basePath, "elements", idx],
           onNavigatePage: (i) => this.goToPage(i),
+          onFormChange: (path, field, value) => this.handleFormChange(path, field, value),
         });
         if (node) div.appendChild(node);
       });
@@ -502,14 +546,26 @@ export class JDFViewer {
 
   private applyZoom() {
     this.pagesEl.style.setProperty("--jdfjs-zoom", String(this.zoom));
-    this.pagesEl.querySelectorAll<HTMLElement>(".jdfjs-page").forEach((el) => {
+    this.pagesEl.querySelectorAll<HTMLElement>(".jdfjs-page-wrapper").forEach((wrapper) => {
+      const el = wrapper.querySelector<HTMLElement>(".jdfjs-page");
+      if (!el) return;
+      // `transform: scale()` does not take part in layout, so the wrapper
+      // used to keep the page's unscaled 794 px footprint: on narrow hosts
+      // the pages column scrolled sideways and the page sat off-centre.
+      // Size the wrapper to the *rendered* box and scale from its corner.
+      const w = parseFloat(el.style.width || "0") || el.offsetWidth;
+      const h = el.offsetHeight;
       el.style.transform = `scale(${this.zoom})`;
-      el.style.transformOrigin = "top center";
+      el.style.transformOrigin = "top left";
+      wrapper.style.width = `${Math.round(w * this.zoom)}px`;
+      wrapper.style.height = `${Math.round(h * this.zoom)}px`;
     });
   }
 
   setZoom(z: number) {
     this.zoom = Math.max(0.25, Math.min(3, z));
+    this.requestedZoom = this.zoom;
+    this.userZoomed = true;
     this.applyZoom();
     this.updateIndicators();
   }
@@ -559,18 +615,40 @@ export class JDFViewer {
   }
 
   /**
-   * Walk every page's elements and yield each form element with its
-   * resolved name. Used by getFormValues / downloadJdf consumers.
+   * Walk every page's elements — recursing into container elements
+   * (collapsible / table cells / list items) and the doc + per-page
+   * header/footer trees — and yield each form element with its resolved
+   * name. Previously this only scanned top-level `page.elements`, so a
+   * field nested inside a collapsible section or placed in a header was
+   * silently dropped from getFormValues / downloadJdf.
    */
   private *iterFormFields(): Generator<{ name: string; field: any }> {
-    for (const page of this.doc.pages || []) {
-      for (const el of (page.elements || []) as any[]) {
-        if (!el || typeof el !== "object") continue;
-        if (el.type === "input" || el.type === "textarea" || el.type === "checkbox" || el.type === "select" || el.type === "signature") {
-          if (typeof el.name === "string" && el.name.length > 0) yield { name: el.name, field: el };
-        }
+    const seen = new Set<any>();
+    const walk = function* (node: any): Generator<{ name: string; field: any }> {
+      if (!node || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        for (const item of node) yield* walk(item);
+        return;
       }
+      const t = node.type;
+      if (t === "input" || t === "textarea" || t === "checkbox" || t === "select" || t === "signature") {
+        if (typeof node.name === "string" && node.name.length > 0) yield { name: node.name, field: node };
+      }
+      // Recurse into any nested element carriers.
+      if (Array.isArray(node.elements)) yield* walk(node.elements);
+      if (Array.isArray(node.items)) yield* walk(node.items);
+      if (Array.isArray(node.rows)) {
+        for (const row of node.rows) if (Array.isArray(row)) yield* walk(row);
+      }
+    };
+    for (const page of this.doc.pages || []) {
+      yield* walk(page.elements);
+      yield* walk(page.header?.elements);
+      yield* walk(page.footer?.elements);
     }
+    yield* walk(this.doc.header?.elements);
+    yield* walk(this.doc.footer?.elements);
   }
 
   toJSON(options: { pretty?: boolean } = {}): string {
@@ -652,6 +730,7 @@ export class JDFViewer {
       setZoom: (z: number) => this.setZoom(z),
       getZoom: () => this.getZoom(),
       goToPage: (i: number) => this.goToPage(i),
+      seek: (elementId: string, seconds: number) => this.seek(elementId, seconds),
       getCurrentPage: () => this.getCurrentPage(),
       setDocument: (d: JdfDocument) => this.setDocument(d),
       destroy: () => this.destroy(),

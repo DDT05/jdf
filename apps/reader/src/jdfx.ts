@@ -12,13 +12,28 @@ import {
 
 const GENERATOR = "JDF Reader 0.1.14";
 
+export interface UnpackedAsset {
+  mimeType: string;
+  /** Raw base64 (no `data:` prefix) — drops straight into `resources.images[id].data`. */
+  base64: string;
+  size: number;
+}
+
 export interface UnpackedJdfx {
   document: JdfDocument;
   manifest: JdfxManifest;
-  /** Asset id → object URL the renderer can use as `<img src>`. */
-  assetUrls: Map<string, string>;
-  /** Frees every object URL allocated for this bundle. */
-  release: () => void;
+  /** Asset id → bytes. The caller binds these into `resources.images` so the
+   *  renderer and the re-packer (`packJdfx`) see one consistent document. */
+  assets: Map<string, UnpackedAsset>;
+}
+
+function uint8ToBase64(arr: Uint8Array): string {
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < arr.length; i += CHUNK) {
+    binary += String.fromCharCode(...arr.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
 function ts(): string {
@@ -46,7 +61,7 @@ export async function unpackJdfx(bytes: Uint8Array | ArrayBuffer): Promise<Unpac
     };
   }
 
-  const assetUrls = new Map<string, string>();
+  const assets = new Map<string, UnpackedAsset>();
   const assetPrefix = `${JDFX_ASSET_DIR}/`;
   for (const entry of manifest.assets) {
     // Path-traversal guard — manifest paths are user-controlled (a hostile
@@ -59,16 +74,11 @@ export async function unpackJdfx(bytes: Uint8Array | ArrayBuffer): Promise<Unpac
     }
     const file = zip.file(entry.path);
     if (!file) continue;
-    const blob = new Blob([await file.async("uint8array") as BlobPart], { type: entry.mimeType });
-    assetUrls.set(entry.id, URL.createObjectURL(blob));
+    const bytes = await file.async("uint8array");
+    assets.set(entry.id, { mimeType: entry.mimeType || mimeOf(entry.path), base64: uint8ToBase64(bytes), size: bytes.length });
   }
 
-  const release = () => {
-    for (const url of assetUrls.values()) URL.revokeObjectURL(url);
-    assetUrls.clear();
-  };
-
-  return { document, manifest, assetUrls, release };
+  return { document, manifest, assets };
 }
 
 export interface PackedJdfx {
@@ -86,29 +96,33 @@ export interface PackedJdfx {
 function extractAssets(doc: JdfDocument): { doc: JdfDocument; assets: Array<{ id: string; bytes: Uint8Array; mimeType: string; ext: string }> } {
   const assets: Array<{ id: string; bytes: Uint8Array; mimeType: string; ext: string }> = [];
   const cloned: JdfDocument = JSON.parse(JSON.stringify(doc));
-  const images = cloned.resources?.images ?? {};
   let counter = 0;
 
-  for (const [key, res] of Object.entries(images)) {
-    if (!res || typeof res !== "object" || !("data" in res) || !res.data) continue;
-    const data = String(res.data);
-    const m = data.match(/^data:([^;]+);base64,(.*)$/);
-    const b64 = m ? m[2] : data;
-    const mimeType = m ? m[1] : (res as any).mimeType || "image/png";
-    const ext = mimeType.split("/")[1]?.replace("jpeg", "jpg") || "bin";
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    counter++;
-    const id = key || `asset-${counter}`;
-    assets.push({ id, bytes, mimeType, ext });
+  // Images and videos are both binary assets; only the bucket differs.
+  for (const bucket of ["images", "videos"] as const) {
+    const store = (cloned.resources as any)?.[bucket] as Record<string, any> | undefined;
+    if (!store) continue;
+    for (const [key, res] of Object.entries(store)) {
+      if (!res || typeof res !== "object" || !("data" in res) || !res.data) continue;
+      const data = String(res.data);
+      const m = data.match(/^data:([^;]+);base64,(.*)$/);
+      const b64 = m ? m[2] : data;
+      const mimeType = m ? m[1] : (res as any).mimeType || (bucket === "videos" ? "video/mp4" : "image/png");
+      const ext = mimeType.split("/")[1]?.replace("jpeg", "jpg").replace("quicktime", "mov") || "bin";
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      counter++;
+      const id = key || `asset-${counter}`;
+      assets.push({ id, bytes, mimeType, ext });
+    }
   }
 
   // Walk every element with src="data:..." or resource="..." backed by extracted asset
   function walk(els: any[] | undefined) {
     if (!els) return;
     for (const el of els) {
-      if (el?.type === "image") {
+      if (el?.type === "image" || el?.type === "video") {
         if (el.src && typeof el.src === "string" && el.src.startsWith("data:")) {
           const m = el.src.match(/^data:([^;]+);base64,(.*)$/);
           if (m) {
@@ -132,6 +146,7 @@ function extractAssets(doc: JdfDocument): { doc: JdfDocument; assets: Array<{ id
   for (const page of cloned.pages || []) walk(page.elements as any[]);
 
   if (cloned.resources?.images) cloned.resources.images = {};
+  if (cloned.resources?.videos) cloned.resources.videos = {};
   return { doc: cloned, assets };
 }
 
@@ -167,14 +182,15 @@ export async function packJdfx(doc: JdfDocument, prevManifest?: JdfxManifest): P
  * Rule: any embedded image (data: URL or non-empty resources.images.*.data) → .jdfx.
  */
 export function shouldUseJdfx(doc: JdfDocument): boolean {
-  const images = doc.resources?.images ?? {};
-  for (const v of Object.values(images)) {
-    if (v && typeof v === "object" && "data" in v && (v as any).data) return true;
+  for (const store of [doc.resources?.images ?? {}, doc.resources?.videos ?? {}]) {
+    for (const v of Object.values(store)) {
+      if (v && typeof v === "object" && "data" in v && (v as any).data) return true;
+    }
   }
   function walk(els: any[] | undefined): boolean {
     if (!els) return false;
     for (const el of els) {
-      if (el?.type === "image" && typeof el.src === "string" && el.src.startsWith("data:")) return true;
+      if ((el?.type === "image" || el?.type === "video") && typeof el.src === "string" && el.src.startsWith("data:")) return true;
       if (el?.elements && walk(el.elements)) return true;
       if (el?.children && walk(el.children)) return true;
     }

@@ -26,7 +26,9 @@ export function applyFieldUpdate(doc: JdfDocument, path: ElementPath, field: str
   let target: any = node;
   for (let i = 0; i < parts.length - 1; i++) {
     if (target[parts[i]] == null || typeof target[parts[i]] !== "object") {
-      target[parts[i]] = {};
+      // A numeric next segment means we're addressing into a list — create
+      // an array, not an object with "0" keys (which breaks schema + render).
+      target[parts[i]] = /^\d+$/.test(parts[i + 1]) ? [] : {};
     }
     target = target[parts[i]];
   }
@@ -111,6 +113,8 @@ export function makeBlankElement(type: Element["type"], y: number = 5): Element 
       return { type: "shape", shape: "rect", position: { x: 0, y }, width: 60, height: 30, fill: "#3b82f6" } as Element;
     case "image":
       return { type: "image", src: "", alt: "Image", position: { x: 0, y }, width: 80, height: 60, fit: "contain" } as Element;
+    case "video":
+      return { type: "video", src: "", title: "Video", controls: true, position: { x: 0, y }, width: 160, height: 90, fit: "contain" } as Element;
     case "collapsible":
       return { type: "collapsible", title: "Section", expanded: true, elements: [], position: { x: 0, y }, width: 166 } as Element;
     case "toc":

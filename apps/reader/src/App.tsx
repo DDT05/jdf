@@ -24,16 +24,14 @@ import {
 } from "./edit/mutations";
 import { createHistory } from "./edit/history";
 import { importPdfToJdf } from "./import/pdfToJdf";
+import { readTextFile, readBinaryFile, writeBinaryFile } from "./lib/fs";
+import { normalizeDoc } from "./lib/docGuard";
+import { PasswordPrompt } from "./components/shared/PasswordPrompt";
 
 interface LoadedFile {
   path: string;
   type: "jdf" | "jdfx" | "md" | "pdf";
   rawMarkdown?: string;
-}
-
-let activeJdfx: { release: () => void } | null = null;
-function releaseActiveJdfx() {
-  if (activeJdfx) { activeJdfx.release(); activeJdfx = null; }
 }
 
 function basename(p: string): string {
@@ -65,6 +63,9 @@ export default function App() {
   const [mdSearchQuery, setMdSearchQuery] = createSignal("");
   const [dirty, setDirty] = createSignal(false);
   const [showFirstRun, setShowFirstRun] = createSignal(!localStorage.getItem("jdf-first-run-done"));
+  // Encrypted PDF support: the importer asks for a password through this
+  // resolver; the modal below feeds the answer back (null = cancelled).
+  const [passwordRequest, setPasswordRequest] = createSignal<{ retry: boolean; resolve: (pw: string | null) => void } | null>(null);
 
   let saveTimer: number | undefined;
 
@@ -102,9 +103,8 @@ export default function App() {
     try {
       if (cur.type === "jdfx") {
         const { packJdfx } = await import("./jdfx");
-        const { writeFile } = await import("@tauri-apps/plugin-fs");
         const { bytes } = await packJdfx(d);
-        await writeFile(cur.path, bytes);
+        await writeBinaryFile(cur.path, bytes);
       } else {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("save_document", { path: cur.path, document: d });
@@ -130,6 +130,10 @@ export default function App() {
   }
 
   function commit(next: JdfDocument) {
+    // Mutations return the *same* object when they had nothing to do (move
+    // up on the first element, edits addressed to a path that doesn't exist).
+    // Pushing that would light up Undo and fire an autosave for a no-op.
+    if (next === doc()) return;
     history.push(next);
     if (isEditableFile()) scheduleAutoSave();
     else setDirty(true);
@@ -155,6 +159,88 @@ export default function App() {
   function appendToPage(pageIndex: number, element: Element) {
     const d = doc(); if (!d) return; commit(appendElementToPage(d, pageIndex, element));
   }
+
+  // ── Media insert: real files, not empty placeholders ─────────────────────
+  // Insert bar "Image"/"Video" opens a file picker; dropping an image/video
+  // onto an open document inserts it. Bytes go into resources.images/videos as
+  // base64 (same shape the PDF importer and the .jdfx unpacker produce), so
+  // autosave/packJdfx carry the asset and jdf.js renders the same document.
+  const MEDIA_MIME: Record<string, string> = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp",
+    mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", mov: "video/quicktime", ogv: "video/ogg",
+  };
+  function mediaMime(filePath: string): string | undefined {
+    return MEDIA_MIME[(filePath.split(".").pop() || "").toLowerCase()];
+  }
+  function bytesToBase64(bytes: Uint8Array): string {
+    let s = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+    return btoa(s);
+  }
+  function imageDims(src: string): Promise<{ w: number; h: number }> {
+    return new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+      im.onerror = () => reject(new Error("image decode failed"));
+      im.src = src;
+    });
+  }
+  /** Next free y on a page (mm): below the lowest element, so an insert never lands on top of existing content. */
+  function nextFreeY(d: JdfDocument, pageIndex: number): number {
+    const els = (d.pages?.[pageIndex]?.elements ?? []) as any[];
+    let bottom = 0;
+    for (const e of els) if (e?.position) bottom = Math.max(bottom, (e.position.y ?? 0) + (e.height ?? 8));
+    return bottom > 0 ? Math.round((bottom + 4) * 10) / 10 : 5;
+  }
+  async function insertMediaFile(filePath: string): Promise<boolean> {
+    const d = doc(); if (!d) return false;
+    const mime = mediaMime(filePath); if (!mime) return false;
+    try {
+      const bytes = await readBinaryFile(filePath);
+      const base64 = bytesToBase64(bytes);
+      const isVideo = mime.startsWith("video/");
+      const name = filePath.split(/[\\/]/).pop() || (isVideo ? "video" : "image");
+      const id = `${isVideo ? "vid" : "img"}-${Date.now().toString(36)}`;
+      const pageIndex = currentPage();
+      const pageW = (typeof d.meta?.pageSize === "object" && d.meta.pageSize && "width" in d.meta.pageSize ? (d.meta.pageSize as any).width : 210) - 32;
+      let width = isVideo ? Math.min(160, pageW) : Math.min(120, pageW), height = isVideo ? width * 9 / 16 : width * 0.75;
+      if (!isVideo) {
+        try { const dims = await imageDims(`data:${mime};base64,${base64}`); width = Math.min(Math.min(120, pageW), dims.w * 0.2646); height = width * dims.h / dims.w; } catch { /* keep default box */ }
+      }
+      const next: JdfDocument = JSON.parse(JSON.stringify(d));
+      next.resources = next.resources ?? {};
+      const bucket = isVideo ? "videos" : "images";
+      (next.resources as any)[bucket] = { ...((next.resources as any)[bucket] ?? {}), [id]: { src: "embedded", mimeType: mime, data: base64 } };
+      const y = nextFreeY(next, pageIndex);
+      const element: Element = isVideo
+        ? ({ type: "video", id, resource: id, title: name.replace(/\.[^.]+$/, ""), controls: true, fit: "contain", position: { x: 0, y }, width: Math.round(width * 10) / 10, height: Math.round(height * 10) / 10 } as Element)
+        : ({ type: "image", id, resource: id, alt: name.replace(/\.[^.]+$/, ""), fit: "contain", position: { x: 0, y }, width: Math.round(width * 10) / 10, height: Math.round(height * 10) / 10 } as Element);
+      commit(appendElementToPage(next, pageIndex, element));
+      return true;
+    } catch (e: any) {
+      setError5s(`Insert failed: ${e?.message || e}`);
+      return true;
+    }
+  }
+  async function pickAndInsertMedia(kind: "image" | "video") {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        filters: [kind === "image"
+          ? { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"] }
+          : { name: "Videos", extensions: ["mp4", "m4v", "webm", "mov", "ogv"] }],
+      });
+      if (!result) return;
+      const filePath = typeof result === "string" ? result : (result as any).path || String(result);
+      await insertMediaFile(filePath);
+    } catch (e) { console.error(e); }
+  }
+  function onInsertElement(el: Element) {
+    // Image/Video from the Insert bar → pick a real file instead of an empty box.
+    if ((el.type === "image" || el.type === "video") && !(el as any).src && !(el as any).resource) { void pickAndInsertMedia(el.type); return; }
+    appendToPage(currentPage(), el);
+  }
   function addPageAfter(pageIndex: number) {
     const d = doc(); if (!d) return; commit(insertPageAfterMutation(d, pageIndex));
   }
@@ -172,21 +258,23 @@ export default function App() {
   }
 
   function performUndo() {
-    const r = history.undo();
-    if (r) maybeAutoSaveAfterHistoryStep();
+    // `history.undo()` returns the unchanged present when the stack is empty
+    // — checking truthiness alone marked imported documents dirty on a stray
+    // Cmd+Z and then nagged about "unsaved edits" on close.
+    if (!history.canUndo()) return;
+    history.undo();
+    maybeAutoSaveAfterHistoryStep();
   }
   function performRedo() {
-    const r = history.redo();
-    if (r) maybeAutoSaveAfterHistoryStep();
+    if (!history.canRedo()) return;
+    history.redo();
+    maybeAutoSaveAfterHistoryStep();
   }
 
   async function loadJdf(path: string) {
     try {
-      const { readTextFile } = await import("@tauri-apps/plugin-fs");
       const content = await readTextFile(path);
-      const parsed = JSON.parse(content) as JdfDocument;
-      if (!parsed.$jdf) throw new Error("Not a JDF document");
-      releaseActiveJdfx();
+      const parsed = normalizeDoc(JSON.parse(content), basename(path).replace(/\.jdf$/i, ""));
       setLoaded({ path, type: "jdf" });
       history.reset(parsed);
       setViewMode("jdf");
@@ -202,32 +290,31 @@ export default function App() {
 
   async function loadJdfx(path: string) {
     try {
-      const { readFile } = await import("@tauri-apps/plugin-fs");
       const { unpackJdfx } = await import("./jdfx");
-      const bytes = await readFile(path);
+      const bytes = await readBinaryFile(path);
       const unpacked = await unpackJdfx(bytes);
 
-      // Inline asset URLs into the document so the existing image renderer
-      // (which reads `src` / `resources.images.<key>.data`) just works without
-      // any awareness of the zip.
-      const doc = unpacked.document;
+      // Bind every zip asset back into `resources.images[id].data` (base64).
+      // The image renderer resolves `resource → resources.images[id]`, and —
+      // crucially — `packJdfx()` on autosave re-extracts exactly those
+      // entries into the bundle. The earlier approach rewrote `el.src` to a
+      // `blob:` object URL: it rendered fine, but the first edit re-packed a
+      // zip with zero assets and `document.json` full of dead blob URLs, so
+      // every image was gone on reopen.
+      const doc = normalizeDoc(unpacked.document, basename(path).replace(/\.jdfx$/i, ""));
       if (!doc.resources) doc.resources = { images: {} };
       if (!doc.resources.images) doc.resources.images = {};
-      function rebind(els: any[] | undefined) {
-        if (!els) return;
-        for (const el of els) {
-          if (el?.type === "image" && el.resource) {
-            const url = unpacked.assetUrls.get(el.resource);
-            if (url) el.src = url;
-          }
-          if (el?.elements) rebind(el.elements);
-          if (el?.children) rebind(el.children);
+      for (const [id, asset] of unpacked.assets) {
+        const res = { src: "embedded" as const, mimeType: asset.mimeType, data: asset.base64 };
+        // Clips bind into resources.videos, everything else into resources.images.
+        if (/^video\//i.test(asset.mimeType)) {
+          if (!doc.resources.videos) doc.resources.videos = {};
+          doc.resources.videos[id] = res;
+        } else {
+          doc.resources.images[id] = res;
         }
       }
-      for (const page of doc.pages || []) rebind(page.elements as any[]);
 
-      releaseActiveJdfx();
-      activeJdfx = { release: unpacked.release };
       setLoaded({ path, type: "jdfx" });
       history.reset(doc);
       setViewMode("jdf");
@@ -245,7 +332,12 @@ export default function App() {
     setImporting(true);
     try {
       const fileName = basename(pdfPath).replace(/\.pdf$/i, "");
-      const parsed = await importPdfToJdf(pdfPath, fileName);
+      // Read through our Rust command (no capability-scope surprises) and
+      // hand bytes to the shared importer — same core as the CLI.
+      const bytes = await readBinaryFile(pdfPath);
+      const parsed = await importPdfToJdf(bytes, fileName, {
+        onPassword: (retry) => new Promise<string | null>((resolve) => setPasswordRequest({ retry, resolve })),
+      });
       if (parsed?.pages?.length) {
         setLoaded({ path: pdfPath, type: "pdf" });
         history.reset(parsed);
@@ -267,7 +359,6 @@ export default function App() {
   async function importMarkdownFile(path: string) {
     setImporting(true);
     try {
-      const { readTextFile } = await import("@tauri-apps/plugin-fs");
       const { preprocessMarkdownImages } = await import("./import/markdownImages");
       const rawOriginal = await readTextFile(path);
       const raw = await preprocessMarkdownImages(rawOriginal, path);
@@ -302,7 +393,11 @@ export default function App() {
     return out;
   }
 
-  function openByExtension(filePath: string) {
+  async function openByExtension(filePath: string) {
+    // Write out any edit still sitting in the autosave debounce before the
+    // loaded file changes underneath it — otherwise the timer fires with the
+    // *new* file as `loaded()` and the last edit to the old one is lost.
+    await flushPendingSave();
     const norm = normaliseDroppedPath(filePath);
     const lower = norm.toLowerCase();
     if (lower.endsWith(".jdfx")) loadJdfx(norm);
@@ -325,9 +420,13 @@ export default function App() {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const off1 = await listen<string>("open-file", (event) => openByExtension(event.payload));
-      const off2 = await listen<any>("tauri://drag-drop", (event) => {
+      const off2 = await listen<any>("tauri://drag-drop", async (event) => {
         const paths: string[] = event.payload?.paths ?? [];
-        if (paths[0]) openByExtension(paths[0]);
+        if (!paths[0]) return;
+        // An image/video dropped onto an open document is an insert, not an open.
+        const p = normaliseDroppedPath(paths[0]);
+        if (doc() && mediaMime(p) && (await insertMediaFile(p))) return;
+        openByExtension(paths[0]);
       });
       onCleanup(() => { off1(); off2(); });
     } catch {}
@@ -430,13 +529,19 @@ export default function App() {
   function handleKeyDown(e: KeyboardEvent) {
     const meta = e.metaKey || e.ctrlKey;
     const target = e.target as HTMLElement;
-    const inField = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+    const inField = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
 
     if (e.key === "Escape") {
       if (showHelp()) { setShowHelp(false); return; }
       if (showSearch()) { setShowSearch(false); return; }
     }
     if (!inField && !meta && e.key === "?") { e.preventDefault(); setShowHelp((v) => !v); return; }
+    // While typing in a field (JSON view, form inputs, inline editors) the
+    // browser owns Cmd+Z / Cmd+S / Cmd+F etc. — hijacking them undid the
+    // *document* while the user meant their text, and Cmd+S in the JSON view
+    // opened a Save As dialog on top of the commit. Only window-level
+    // shortcuts stay active inside fields.
+    if (inField && meta && !["o", "n", "w", "p", "d", "b", "=", "+", "-", "0"].includes(e.key)) return;
 
     if (meta && e.key === "z" && !e.shiftKey) { e.preventDefault(); performUndo(); }
     else if (meta && (e.key === "Z" || (e.shiftKey && e.key.toLowerCase() === "z") || e.key === "y")) { e.preventDefault(); performRedo(); }
@@ -504,9 +609,8 @@ export default function App() {
       const out = String(path);
       const lower = out.toLowerCase();
       if (lower.endsWith(".jdfx")) {
-        const { writeFile } = await import("@tauri-apps/plugin-fs");
         const { bytes } = await packJdfx(d);
-        await writeFile(out, bytes);
+        await writeBinaryFile(out, bytes);
         setLoaded({ ...cur, path: out, type: "jdfx" });
       } else {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -583,7 +687,7 @@ export default function App() {
 
         <Show when={loaded() && doc() && (viewMode() === "jdf")}>
           <div class="flex justify-center py-2 border-b border-gray-100 dark:border-slate-800 bg-gray-50 dark:bg-slate-900/60">
-            <InsertBar onInsert={(el) => appendToPage(currentPage(), el)} />
+            <InsertBar onInsert={onInsertElement} />
           </div>
         </Show>
 
@@ -637,6 +741,14 @@ export default function App() {
 
         <Show when={showHelp()}>
           <HelpOverlay onClose={() => setShowHelp(false)} />
+        </Show>
+
+        <Show when={passwordRequest()}>
+          <PasswordPrompt
+            retry={passwordRequest()!.retry}
+            onSubmit={(pw) => { const r = passwordRequest(); setPasswordRequest(null); r?.resolve(pw); }}
+            onCancel={() => { const r = passwordRequest(); setPasswordRequest(null); r?.resolve(null); }}
+          />
         </Show>
 
         <Show when={importing()}>

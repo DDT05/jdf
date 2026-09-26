@@ -4,6 +4,7 @@ import { unitToPx } from "@jdf/core";
 import { TextElementView } from "./TextElement";
 import { RichTextElementView } from "./RichTextElement";
 import { ImageElementView } from "./ImageElement";
+import { VideoElementView } from "./VideoElement";
 import { TableElementView } from "./TableElement";
 import { ListElementView } from "./ListElement";
 import { ShapeElementView } from "./ShapeElement";
@@ -45,6 +46,7 @@ export function ElementRenderer(props: ElementRendererProps) {
       onMouseEnter={() => edit.enabled() && setHover(true)}
       onMouseLeave={() => setHover(false)}
       data-element-path={JSON.stringify(props.path)}
+      data-jdf-type={(props.element as any).type}
     >
       <Switch fallback={<div class="text-xs text-gray-400">[unknown: {(props.element as any).type}]</div>}>
         <Match when={props.element.type === "text"}>
@@ -55,6 +57,9 @@ export function ElementRenderer(props: ElementRendererProps) {
         </Match>
         <Match when={props.element.type === "image"}>
           <ImageElementView element={props.element as any} styles={props.styles} resources={props.resources} path={props.path} />
+        </Match>
+        <Match when={props.element.type === "video"}>
+          <VideoElementView element={props.element as any} styles={props.styles} resources={props.resources} path={props.path} />
         </Match>
         <Match when={props.element.type === "table"}>
           <TableElementView element={props.element as any} styles={props.styles} path={props.path} />

@@ -1,4 +1,5 @@
 import { Show } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ImageElement, Style, Resources, ImageResource } from "@jdf/core";
 import { resolveStyle } from "./PageRenderer";
 import { Editable } from "../shared/Editable";
@@ -39,15 +40,8 @@ export function ImageElementView(props: ImageElementViewProps) {
       }
       if (res?.path) {
         // Filesystem paths can't load via plain <img src> in a Tauri webview
-        // — they need the asset:// protocol via convertFileSrc. Fall back to
-        // returning the raw path if the API isn't available (e.g. preview
-        // outside Tauri).
-        try {
-          // @ts-ignore — runtime Tauri API
-          const { convertFileSrc } = (window as any).__TAURI__?.core || {};
-          if (typeof convertFileSrc === "function") return convertFileSrc(res.path);
-        } catch { /* swallow */ }
-        return res.path;
+        // — they go through the asset:// protocol (enabled in tauri.conf.json).
+        try { return convertFileSrc(res.path); } catch { return res.path; }
       }
     }
     return el.src || "";
@@ -66,7 +60,8 @@ export function ImageElementView(props: ImageElementViewProps) {
     <div style={{ width: "100%", height: "100%" }}>
       <img
         src={src()}
-        alt={props.element.alt || ""}
+        alt={props.element.alt || props.element.caption || ""}
+        title={props.element.caption || undefined}
         class={`${fitClass()} block`}
         style={{ ...css(), width: "100%", height: "100%" }}
       />
