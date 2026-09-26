@@ -23,8 +23,11 @@ const fixture = fixtureArg || path.join(repo, "spec/examples/elements-gallery.jd
 const shot = shotArg || path.join(repo, ".win-smoke.png");
 const abs = path.resolve(fixture);
 const PORT = 9222;
+// Own WebView2 profile: instances sharing a user-data folder share one browser process,
+// so a reader the user already has open would swallow our debugging flag (and we must never kill theirs).
+const userData = path.join(process.env.TEMP || process.env.TMP || ".", "jdf-smoke-webview2");
 const proc = spawn(exe, [], {
-  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}` },
+  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`, WEBVIEW2_USER_DATA_FOLDER: userData },
   stdio: "ignore", detached: false,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -70,7 +73,7 @@ try {
   try { await browser.close(); } catch {}
   proc.kill();
   // WebView2 helper processes can outlive the parent
-  spawn("taskkill", ["/F", "/IM", path.basename(exe), "/T"], { stdio: "ignore" });
+  spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { stdio: "ignore" });
   const badVideo = (result.videos || []).some((v) => v.error || v.readyState < 1);
   const bad = result.errors.length || (result.unknown || []).length || result.toast || badVideo;
   console.log(bad ? "\nWindows smoke FAILED" : "\nWindows smoke passed: real app renders the fixture with no CSP/console errors.");
