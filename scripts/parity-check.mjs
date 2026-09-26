@@ -24,12 +24,7 @@ import { createRequire } from "node:module";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..");
 const staticOnly = process.argv.includes("--static");
-// Normalise CRLF so the regexes below behave the same on a core.autocrlf checkout.
-const read = (p) => fs.readFileSync(path.join(repo, p), "utf8").replace(/\r\n/g, "\n");
-const isWin = process.platform === "win32";
-// `npx` / `python3` are .cmd shims (or absent) on Windows; go through the shell there.
-const sh = { shell: isWin };
-const PYTHON = isWin ? "python" : "python3";
+const read = (p) => fs.readFileSync(path.join(repo, p), "utf8");
 const failures = [];
 const ok = (cond, msg) => { console.log(`${cond ? "✓" : "✗"} ${msg}`); if (!cond) failures.push(msg); return cond; };
 
@@ -57,7 +52,7 @@ const surfaces = [
   ["jdf chunk",           "tools/jdf-cli/src/commands/chunk.ts",                   (t) => new RegExp(`"${t}"`)],
 ];
 const fixturesDir = ["spec/examples", "docs/examples"];
-const fixtures = fixturesDir.flatMap((d) => fs.readdirSync(path.join(repo, d)).filter((f) => /\.jdfx?$/.test(f)).map((f) => path.posix.join(d, f)));
+const fixtures = fixturesDir.flatMap((d) => fs.readdirSync(path.join(repo, d)).filter((f) => /\.jdfx?$/.test(f)).map((f) => path.join(d, f)));
 const specTypes = new Set();
 for (const f of fixtures.filter((f) => f.startsWith("spec/") && f.endsWith(".jdf"))) {
   (function walk(o) { if (Array.isArray(o)) return o.forEach(walk); if (!o || typeof o !== "object") return; if (typeof o.type === "string" && types.has(o.type)) specTypes.add(o.type); Object.values(o).forEach(walk); })(JSON.parse(read(f)));
@@ -70,9 +65,8 @@ for (const t of [...types].sort()) {
 
 // ── 3. CLI validate every fixture ────────────────────────────────────────────
 for (const f of fixtures) {
-  const r = spawnSync("npx", ["tsx", "src/index.ts", "validate", path.join(repo, f)], { cwd: path.join(repo, "tools/jdf-cli"), encoding: "utf8", ...sh });
-  const out = `${r.stdout ?? ""}${r.stderr ?? ""}${r.error ? r.error.message : ""}`;
-  ok(r.status === 0, `jdf validate ${f}${r.status === 0 ? "" : `\n${out.trim().split("\n").slice(-6).join("\n")}`}`);
+  const r = spawnSync("npx", ["tsx", "src/index.ts", "validate", path.join(repo, f)], { cwd: path.join(repo, "tools/jdf-cli"), encoding: "utf8" });
+  ok(r.status === 0, `jdf validate ${f}${r.status === 0 ? "" : `\n${(r.stdout + r.stderr).trim().split("\n").slice(-6).join("\n")}`}`);
 }
 
 if (staticOnly) finish();
@@ -85,9 +79,9 @@ for (const [what, p] of [["jdf.js bundle", "jdfjs/dist/jdfjs.js"], ["reader buil
   if (!fs.existsSync(path.join(repo, p))) { failures.push(`${what} missing (${p}) — run the build first`); console.log(`✗ ${what} missing: ${p}`); finish(); }
 }
 const PORT = 4173;
-const server = spawn(PYTHON, ["-m", "http.server", String(PORT), "--bind", "127.0.0.1"], { cwd: repo, stdio: "ignore" });
+const server = spawn("python3", ["-m", "http.server", String(PORT), "--bind", "127.0.0.1"], { cwd: repo, stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
-const readerServer = spawn(PYTHON, ["-m", "http.server", String(PORT + 1), "--bind", "127.0.0.1"], { cwd: path.join(repo, "apps/reader/dist"), stdio: "ignore" });
+const readerServer = spawn("python3", ["-m", "http.server", String(PORT + 1), "--bind", "127.0.0.1"], { cwd: path.join(repo, "apps/reader/dist"), stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 800));
 
 // Expected top-level elements per fixture (header/footer elements excluded — both renderers put them in their own containers).
@@ -144,8 +138,6 @@ try {
           },
         };
         localStorage.setItem("jdf-recent", JSON.stringify([abs]));
-        // The first-run wizard is a full-screen overlay; a fresh browser profile would otherwise never reach the recent list.
-        localStorage.setItem("jdf-first-run-done", "1");
       }, { abs, b64: bytes.toString("base64"), isBinary: f.endsWith(".jdfx") });
       await page.goto(`http://127.0.0.1:${PORT + 1}/`);
       try {
