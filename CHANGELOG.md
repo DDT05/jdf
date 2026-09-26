@@ -21,6 +21,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · semantic-ish
 - Reader Insert bar now offers the five form elements (Input, Textarea, Checkbox, Select, Signature) — `makeBlankElement` already knew them, the toolbar did not.
 - Both renderers tag element wrappers with `data-jdf-type`; jdf.js now renders `[unknown: <type>]` for unknown element types instead of silently dropping them (same fallback the reader has always shown).
 
+### Fixed — desktop reader on Windows
+- **Video elements never played in the built app.** The Tauri CSP had no `media-src`, so `<video>` sources (bundled `data:` clips, hosted `https:` files, the WebVTT transcript track) fell back to `default-src` and WebView2 rejected them ("Media load rejected by URL safety check") — the poster still showed, so the box looked fine. `media-src` now allows `data: blob: https: asset: http://asset.localhost`; `img-src` / `font-src` also allow `http://asset.localhost`, which is what `convertFileSrc` produces on Windows for `path`-backed resources. Found with `scripts/win-smoke.mjs`, which launches the release exe with WebView2 remote debugging and checks a fixture over CDP (the parity gate renders the reader in plain Chrome, without Tauri's CSP, and cannot see this).
+- `jdf convert file.pdf` failed on Windows ("Received protocol 'd:'"): PDF.js's fake worker is `import()`ed from a bare path; it is now a `file://` URL.
+- `pnpm parity` runs on Windows (CRLF-normalised sources, posix fixture paths, `python` fallback, shell spawn for `npx`, first-run wizard skipped in the mocked reader).
+
 ### Fixed
 - Reader search (`extract_text`) indexes form labels, values and placeholders — a filled form is findable by what was typed.
 - Reader `<video>` no longer requests CORS (`crossorigin="anonymous"`); a hosted mp4 without `Access-Control-Allow-Origin` played in jdf.js but stayed blank on desktop.
