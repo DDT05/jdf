@@ -36,7 +36,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Validate hello-world.jdf
-        run: pnpm --filter @jdf/cli start validate spec/examples/hello-world.jdf
+        run: pnpm --filter @uurtech/jdf-cli start validate ../../spec/examples/hello-world.jdf
 
   rust:
     name: Rust check (${{ matrix.os }})
@@ -56,3 +56,4 @@ jobs:
         with:
           workspaces: apps/reader/src-tauri
       - run: cargo check --manifest-path apps/reader/src-tauri/Cargo.toml
+

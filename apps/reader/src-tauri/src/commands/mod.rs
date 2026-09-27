@@ -522,7 +522,7 @@ fn measure_element(el: &serde_json::Value, document: &serde_json::Value) -> f32 
     let fs = get_font_size(el, document) as f32;
     let mono = is_mono(el, document);
     let char_factor = if mono { 0.62 } else { 0.5 };
-    let line_mm = fs * PT_TO_MM * LINE_HEIGHT;
+    let line_mm = fs * PT_TO_MM * get_line_height(el, document);
     match tp {
         "text" => {
             let content = el.get("content").and_then(|c| c.as_str()).unwrap_or("");
@@ -639,8 +639,13 @@ fn draw_element(
     // line spacing roughly 6× too tight on small text and 2.83× too loose
     // on large text after compounding with the page conversion.
     // PT_TO_MM / LINE_HEIGHT now live at module scope so table + text agree.
-    let line_mm = fs * PT_TO_MM * LINE_HEIGHT;
-    let to_pdf_y = |y: f32, line: f32| Mm(page_h - margin_top - y - line * line_mm);
+    // Line pitch honours style.lineHeight (folded PDF paragraphs carry the
+    // measured pitch, headings often 1.1) — same as both HTML renderers.
+    let lh = get_line_height(el, document);
+    let line_mm = fs * PT_TO_MM * lh;
+    // Baseline of line N sits inside the box, not on its top edge (see baseline_offset_mm).
+    let baseline_mm = baseline_offset_mm(fs, lh);
+    let to_pdf_y = |y: f32, line: f32| Mm(page_h - margin_top - y - line * line_mm - baseline_mm);
     // Char-advance factor: monospaced Courier is wider than the proportional
     // Helvetica family. Used by wrap_text to estimate how many chars fit.
     let char_factor = if is_mono(el, document) { 0.62 } else { 0.5 };
@@ -1863,6 +1868,29 @@ fn extract_text(el: &serde_json::Value) -> String {
         }
     }
     out
+}
+
+/// `style.lineHeight` (unitless multiplier, inline or via a named style); the
+/// renderers default to 1.2 so the exporter does too.
+fn get_line_height(el: &serde_json::Value, doc: &serde_json::Value) -> f32 {
+    if let Some(s) = el.get("style") {
+        if let Some(lh) = s.get("lineHeight").and_then(|v| v.as_f64()) { if lh > 0.0 { return lh as f32; } }
+        if let Some(name) = s.as_str() {
+            if let Some(lh) = doc.get("styles").and_then(|ss| ss.get(name)).and_then(|s| s.get("lineHeight")).and_then(|v| v.as_f64()) { if lh > 0.0 { return lh as f32; } }
+        }
+    }
+    LINE_HEIGHT
+}
+
+/// Distance (mm) from the top of a line box to its baseline, the way a browser
+/// places text: half-leading + ascent. With Helvetica/Arial metrics (ascent
+/// 0.905em, descent 0.212em) that is `(lh - 1.117) / 2 + 0.905 = 0.5*lh + 0.35` em.
+/// Both HTML renderers put the element's top edge at `position.y` and let the
+/// first line hang below it; drawing the baseline *at* `position.y` (the old
+/// behaviour) lifted every text one line up, so a 32pt heading climbed into
+/// the label above it and underline shapes landed above their text.
+fn baseline_offset_mm(fs_pt: f32, lh: f32) -> f32 {
+    fs_pt * PT_TO_MM * (0.5 * lh + 0.35)
 }
 
 fn get_font_size(el: &serde_json::Value, doc: &serde_json::Value) -> f64 {

@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: UurTech.JDFReader
+PackageVersion: 0.1.21
+PackageLocale: en-US
+Publisher: UurTech
+PublisherUrl: https://github.com/uurtech
+PublisherSupportUrl: https://github.com/uurtech/jdf/issues
+PackageName: JDF Reader
+PackageUrl: https://github.com/uurtech/jdf
+License: MIT
+LicenseUrl: https://github.com/uurtech/jdf/blob/master/LICENSE
+ShortDescription: Native desktop reader for JDF (JSON Document Format) files
+Description: |-
+  JDF Reader is a native desktop application for viewing, editing, and converting JDF documents.
+  JDF is an AI-native document format built on JSON — open, structured, and machine-readable by default.
+  Import PDFs and Markdown, edit in place, export to PDF. The format is the contract — every surface honors it identically.
+Tags:
+  - document
+  - json
+  - pdf
+  - reader
+  - editor
+  - jdf
+  - ai
+  - markdown
+Moniker: jdf
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

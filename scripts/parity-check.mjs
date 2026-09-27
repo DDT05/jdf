@@ -138,6 +138,7 @@ try {
           },
         };
         localStorage.setItem("jdf-recent", JSON.stringify([abs]));
+        localStorage.setItem("jdf-first-run-done", "1"); // the onboarding overlay would swallow the click below
       }, { abs, b64: bytes.toString("base64"), isBinary: f.endsWith(".jdfx") });
       await page.goto(`http://127.0.0.1:${PORT + 1}/`);
       try {
