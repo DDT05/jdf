@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · semantic-ish
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-27
+
+Collects everything shipped since 0.2.1 (0.2.2 and 0.2.3 went out without a changelog heading) plus this release's financial-statement table work.
+
 ### Fixed — financial PDFs (10-K, interim statements, management reports) convert as tables that look like the source
 Found on a batch of annual reports, proxy statements and bank interim statements (see `bench/`-style side-by-side renders in the PR): rows welded into one line, statements half-detected and drawn 3× taller on top of the text below, fake-bold text drawn twice, covers and résumés turned into tables.
 - **Importer, run merging (`core.ts`)**: whitespace-only PDF.js items wider than a column gap (2 em; 1 em on pages where a quarter of the spaces are that wide) are dropped instead of stretching the previous run to the next cell — Excel/PowerPoint/Word tables position cells with one wide space, which used to weld "United States $ 36,439 $ 30,143 …" into one text. Visual-row joins and element widths use the capped glyph extent everywhere (the "Recep" + 250 pt of space + address column bug). A currency sign after a number opens the next column. Lines drawn two or three times a fraction of a point apart (fake bold, outlines) are kept once and flagged bold.
