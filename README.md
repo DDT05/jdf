@@ -918,10 +918,17 @@ Thanks to everyone who has helped shape JDF — code, design, docs, feedback.
         <sub><b>nanda1505</b></sub>
       </a>
     </td>
+    <td align="center">
+      <a href="https://github.com/DenizSAHIN570" title="Deniz ŞAHİN (DenizSAHIN570)">
+        <img src="https://images.weserv.nl/?url=avatars.githubusercontent.com/u/87481856&w=72&h=72&mask=circle&fit=cover" width="72" height="72" alt="DenizSAHIN570" /><br />
+        <sub><b>Deniz ŞAHİN</b></sub><br />
+        <sub>@DenizSAHIN570</sub>
+      </a>
+    </td>
   </tr>
 </table>
 
-[@uurtech](https://github.com/uurtech) · [@feyzademirel](https://github.com/feyzademirel) · [@rcpzen](https://github.com/rcpzen) · [@uguracikgoz](https://github.com/uguracikgoz) · [@EienMosu](https://github.com/EienMosu) · [@nanda1505](https://github.com/nanda1505)
+[@uurtech](https://github.com/uurtech) · [@feyzademirel](https://github.com/feyzademirel) · [@rcpzen](https://github.com/rcpzen) · [@uguracikgoz](https://github.com/uguracikgoz) · [@EienMosu](https://github.com/EienMosu) · [@nanda1505](https://github.com/nanda1505) · [@DenizSAHIN570](https://github.com/DenizSAHIN570) (Linux MIME types, AppImage build, release assets, sidebar thumbnails, icon set)
 
 ## License
 
