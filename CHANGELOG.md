@@ -21,6 +21,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · semantic-ish
 - Reader Insert bar now offers the five form elements (Input, Textarea, Checkbox, Select, Signature) — `makeBlankElement` already knew them, the toolbar did not.
 - Both renderers tag element wrappers with `data-jdf-type`; jdf.js now renders `[unknown: <type>]` for unknown element types instead of silently dropping them (same fallback the reader has always shown).
 
+### Added — desktop reader on Windows (community, @rcpzen)
+- NSIS/MSI installers with branded assets, `.jdf`/`.jdfx` associations, a frameless window with its own title bar (Windows only; macOS/Linux keep native chrome), first-run onboarding, dark mode following the OS, close-confirmation via native dialogs, WinGet manifests under `winget/`.
+
+### Fixed — desktop reader on Windows
+- **PDF export drew every text one line too high.** The exporter put the baseline of a text's first line *on* the element's top edge, while both HTML renderers start the line box at `position.y` and hang the glyphs below it. Result: a 32pt heading climbed into the small label above it, underline shapes landed above their text and neighbouring elements read as "iç içe geçmiş" in the browser's PDF viewer. Text now uses a browser-style baseline (half-leading + ascent, `0.5·lineHeight + 0.35` em) and honours `style.lineHeight` (headings at 1.1, folded PDF paragraphs at their measured pitch) instead of a fixed 1.2 — the exported page matches the reader line for line. Reproduced and verified with the real exe (`export_pdf` over CDP) on `hello-world.jdf`, `customer-form.jdf` and a converted `sample.pdf`.
+- **Video elements never played in the built app.** The Tauri CSP had no `media-src`, so `<video>` sources (bundled `data:` clips, hosted `https:` files, the WebVTT transcript track) fell back to `default-src` and WebView2 rejected them ("Media load rejected by URL safety check") — the poster still showed, so the box looked fine. `media-src` now allows `data: blob: https: asset: http://asset.localhost`; `img-src` / `font-src` also allow `http://asset.localhost`, which is what `convertFileSrc` produces on Windows for `path`-backed resources. Found with `scripts/win-smoke.mjs`, which launches the release exe with WebView2 remote debugging and checks a fixture over CDP (the parity gate renders the reader in plain Chrome, without Tauri's CSP, and cannot see this).
+
 ### Fixed
 - Reader search (`extract_text`) indexes form labels, values and placeholders — a filled form is findable by what was typed.
 - Reader `<video>` no longer requests CORS (`crossorigin="anonymous"`); a hosted mp4 without `Access-Control-Allow-Origin` played in jdf.js but stayed blank on desktop.

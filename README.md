@@ -15,7 +15,7 @@ JDF runs in three places:
 
 | Surface | What it is | Install |
 |---|---|---|
-| **JDF Reader** | Native macOS app — read, edit, import PDF/MD, export PDF | `brew tap uurtech/jdf && brew install jdf` |
+| **JDF Reader** | Native desktop app — read, edit, import PDF/MD, export PDF | macOS: `brew tap uurtech/jdf && brew install jdf` · Windows: `.exe` / `.msi` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
 | **jdf.js** | JavaScript library — embed `.jdf` files on any web page | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.2.3">` |
 | **`@uurtech/jdf-cli`** | CLI — validate, convert PDF/JSON/MD→JDF, and RAG-native `chunk` + `embed` | `brew tap uurtech/jdf && brew install jdf-cli`, `npm i -g @uurtech/jdf-cli`, or `npx @uurtech/jdf-cli convert paper.pdf` |
 
@@ -83,7 +83,13 @@ The Cask formula lives in a separate tap repo: [`uurtech/homebrew-jdf/Casks/jdf.
 
 The **CLI** ships through the same tap as a Homebrew Formula (`brew tap uurtech/jdf && brew install jdf-cli`), so you can grab it without Node/npm — the canonical recipe is [`Formula/jdf-cli.rb`](Formula/jdf-cli.rb), mirrored into the tap on every release.
 
-Linux and Windows builds (`.deb`, `.AppImage`, `.rpm`, `.msi`, `.exe`) are produced by the GitHub Actions release workflow on every tag — see the [latest release](https://github.com/uurtech/jdf/releases/latest).
+### Desktop · Windows
+
+Download the `.exe` (NSIS) or `.msi` installer from the [latest release](https://github.com/uurtech/jdf/releases/latest) and run it. The installer registers `.jdf` and `.jdfx` file associations automatically. Windows builds are community-maintained; a WinGet manifest lives under `winget/` and will be submitted once the package is accepted.
+
+### Desktop · Linux
+
+Download `.deb`, `.AppImage`, or `.rpm` from the [latest release](https://github.com/uurtech/jdf/releases/latest).
 
 ### Web · jdf.js
 
@@ -120,7 +126,7 @@ pnpm install
 pnpm tauri build      # produces .app + .dmg in apps/reader/src-tauri/target/release/bundle/
 ```
 
-Requires Node 20+, pnpm 9+, Rust stable, Xcode CLT (macOS).
+Requires Node 20+, pnpm 9+, Rust stable. Platform-specific: Xcode CLT (macOS), Visual Studio Build Tools with C++ workload + WebView2 (Windows), `libwebkit2gtk-4.1-dev libgtk-3-dev` (Linux).
 
 On Linux, the `.deb`/`.rpm` bundle fine as-is, but on distros with a newer
 toolchain (Fedora, Arch, …) the AppImage step can fail — linuxdeploy's
@@ -229,7 +235,8 @@ Editing lives in the desktop Reader only — jdf.js is a viewer, the CLI is non-
 | Surface | How to get it |
 |---|---|
 | **JDF Reader** (macOS) | `brew tap uurtech/jdf && brew install jdf` — DMG / `.app`, signed via GitHub release |
-| **JDF Reader** (Linux / Windows) | `.deb` / `.AppImage` / `.rpm` / `.msi` / `.exe` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
+| **JDF Reader** (Windows) | `.exe` / `.msi` from the [latest release](https://github.com/uurtech/jdf/releases/latest) (community-maintained) |
+| **JDF Reader** (Linux) | `.deb` / `.AppImage` / `.rpm` from the [latest release](https://github.com/uurtech/jdf/releases/latest) |
 | **jdf.js** | `npm install @uurtech/jdf` or `<script src="https://unpkg.com/@uurtech/jdf@0.2.3">` |
 | **`@uurtech/jdf-cli`** | `brew tap uurtech/jdf && brew install jdf-cli`, `npm i -g @uurtech/jdf-cli`, or `npx @uurtech/jdf-cli validate file.jdf` (no install) |
 

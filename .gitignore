@@ -56,3 +56,4 @@ demos/*/out/
 
 # Real-corpus benchmark downloads (bench/byoc.py)
 bench/byoc/cache/
+.win-smoke.png
