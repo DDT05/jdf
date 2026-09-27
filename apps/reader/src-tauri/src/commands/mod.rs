@@ -396,6 +396,41 @@ fn stroke_rect(layer: &printpdf::PdfLayerReference, x: f32, y_bottom: f32, w: f3
     layer.add_polygon(Polygon { rings: vec![pts], mode: path::PaintMode::Stroke, winding_order: path::WindingOrder::NonZero });
 }
 
+/// Cell padding of a table in mm: `style.padding` as a CSS-like string
+/// ("0.6mm 1.2mm", "4px 8px"), a bare number (px, like the HTML renderers) or
+/// absent (1.5 mm, the historical default). Returns (vertical, horizontal).
+fn table_padding_mm(el: &serde_json::Value, doc: &serde_json::Value) -> (f32, f32) {
+    let px_to_mm = |v: f32| v / 3.7795;
+    let parse_tok = |t: &str| -> Option<f32> {
+        let t = t.trim();
+        if let Some(n) = t.strip_suffix("mm") { return n.trim().parse::<f32>().ok(); }
+        if let Some(n) = t.strip_suffix("px") { return n.trim().parse::<f32>().ok().map(px_to_mm); }
+        if let Some(n) = t.strip_suffix("pt") { return n.trim().parse::<f32>().ok().map(|v| v * PT_TO_MM); }
+        t.parse::<f32>().ok().map(px_to_mm)
+    };
+    let inline = el.get("style").and_then(|s| s.get("padding"));
+    if let Some(n) = inline.and_then(|v| v.as_f64()) { let m = px_to_mm(n as f32); return (m, m); }
+    let text = inline.and_then(|v| v.as_str()).map(String::from)
+        .or_else(|| style_ref_str(el.get("style"), doc, "padding"));
+    if let Some(t) = text {
+        let toks: Vec<f32> = t.split_whitespace().filter_map(parse_tok).collect();
+        match toks.len() {
+            0 => {}
+            1 => return (toks[0], toks[0]),
+            _ => return (toks[0], toks[1]),
+        }
+    }
+    (1.5, 1.5)
+}
+
+/// Line height multiplier of a table (`style.lineHeight`, default LINE_HEIGHT).
+fn table_line_height(el: &serde_json::Value, doc: &serde_json::Value) -> f32 {
+    el.get("style").and_then(|s| s.get("lineHeight")).and_then(|v| v.as_f64()).map(|v| v as f32)
+        .or_else(|| style_ref_str(el.get("style"), doc, "lineHeight").and_then(|s| s.parse::<f32>().ok()))
+        .filter(|v| *v > 0.5 && *v < 4.0)
+        .unwrap_or(LINE_HEIGHT)
+}
+
 /// Resolve a single string field (e.g. "backgroundColor", "color") from a
 /// StyleRef that may be an inline object, a named-style string, or an array of
 /// named styles (later entries win).
@@ -509,7 +544,8 @@ fn measure_element(el: &serde_json::Value, document: &serde_json::Value) -> f32 
             }).unwrap_or(0.0) + 2.0
         }
         "table" => {
-            let pad = 1.5f32;
+            let (pad_v, pad_h) = table_padding_mm(el, document);
+            let line_mm = fs * PT_TO_MM * table_line_height(el, document);
             let col_count = el.get("headers").and_then(|h| h.as_array()).map(|a| a.len()).unwrap_or(0)
                 .max(el.get("rows").and_then(|r| r.as_array()).and_then(|a| a.iter().map(|r| r.as_array().map(|x| x.len()).unwrap_or(0)).max()).unwrap_or(0));
             if col_count == 0 { return line_mm; }
@@ -517,8 +553,8 @@ fn measure_element(el: &serde_json::Value, document: &serde_json::Value) -> f32 
             let mut total = 0.0f32;
             let row_h = |cells: &dyn Fn(usize) -> String| -> f32 {
                 let mut max_lines = 1usize;
-                for ci in 0..col_count { max_lines = max_lines.max(wrap_text(&cells(ci), fs, (col_w - 2.0 * pad).max(1.0), char_factor).len().max(1)); }
-                max_lines as f32 * line_mm + 2.0 * pad
+                for ci in 0..col_count { max_lines = max_lines.max(wrap_text(&cells(ci), fs, (col_w - 2.0 * pad_h).max(1.0), char_factor).len().max(1)); }
+                max_lines as f32 * line_mm + 2.0 * pad_v
             };
             if let Some(h) = el.get("headers").and_then(|h| h.as_array()) {
                 let hs: Vec<String> = h.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -1077,9 +1113,12 @@ fn draw_table(
     let header_bg = style_ref_str(el.get("headerStyle"), doc, "backgroundColor").and_then(|c| parse_color(&c));
     let alt_bg = el.get("alternatingRowColor").and_then(|c| c.as_str()).and_then(parse_color)
         .or_else(|| style_ref_str(el.get("alternateRowStyle"), doc, "backgroundColor").and_then(|c| parse_color(&c)));
+    // rowStyle paints every body row; alternateRowStyle / alternatingRowColor
+    // override the odd ones (same rule as jdf.js and the reader).
+    let row_bg = style_ref_str(el.get("rowStyle"), doc, "backgroundColor").and_then(|c| parse_color(&c));
 
-    let pad = 1.5f32; // cell padding in mm
-    let line_mm = fs * PT_TO_MM * LINE_HEIGHT;
+    let (pad_v, pad_h) = table_padding_mm(el, doc); // cell padding in mm (style.padding)
+    let line_mm = fs * PT_TO_MM * table_line_height(el, doc);
 
     // Per-column and per-cell alignment.
     let col_align = |ci: usize| -> Option<String> {
@@ -1091,10 +1130,10 @@ fn draw_table(
         let mut max_lines = 1usize;
         for ci in 0..col_count {
             let text = cells(ci);
-            let n = wrap_text(&text, fs, (col_w[ci] - 2.0 * pad).max(1.0), char_factor).len().max(1);
+            let n = wrap_text(&text, fs, (col_w[ci] - 2.0 * pad_h).max(1.0), char_factor).len().max(1);
             max_lines = max_lines.max(n);
         }
-        max_lines as f32 * line_mm + 2.0 * pad
+        max_lines as f32 * line_mm + 2.0 * pad_v
     };
 
     // Draw one row of cells at the given top-y (mm from bottom). Returns row height.
@@ -1112,19 +1151,19 @@ fn draw_table(
                 stroke_rect(layer, cx, row_bottom, col_w[ci], h, border_color.clone(), border_w);
             }
             let text = cell_text(ci);
-            let inner_w = (col_w[ci] - 2.0 * pad).max(1.0);
+            let inner_w = (col_w[ci] - 2.0 * pad_h).max(1.0);
             let wrapped = wrap_text(&text, fs, inner_w, char_factor);
             let align = cell_align(ci).or_else(|| col_align(ci));
             for (li, line) in wrapped.iter().enumerate() {
                 if line.is_empty() { continue; }
                 let tw = text_width_mm(line, fs, char_factor);
                 let tx = match align.as_deref() {
-                    Some("right") => cx + col_w[ci] - pad - tw,
+                    Some("right") => cx + col_w[ci] - pad_h - tw,
                     Some("center") => cx + (col_w[ci] - tw) / 2.0,
-                    _ => cx + pad,
+                    _ => cx + pad_h,
                 };
-                let ty = row_top - pad - (li as f32 + 1.0) * line_mm + line_mm * 0.25;
-                layer.use_text(line.to_string(), fs, Mm(tx.max(cx + pad)), Mm(ty), face);
+                let ty = row_top - pad_v - (li as f32 + 1.0) * line_mm + line_mm * 0.25;
+                layer.use_text(line.to_string(), fs, Mm(tx.max(cx + pad_h)), Mm(ty), face);
             }
         }
         h
@@ -1152,7 +1191,7 @@ fn draw_table(
         let getalign = move |ci: usize| -> Option<String> {
             row2.get(ci).and_then(|v| v.get("align")).and_then(|a| a.as_str()).map(String::from)
         };
-        let bg = if ri % 2 == 1 { alt_bg.clone() } else { None };
+        let bg = if ri % 2 == 1 { alt_bg.clone().or_else(|| row_bg.clone()) } else { row_bg.clone() };
         let h = draw_row(&get, &getalign, cursor, font, bg);
         cursor -= h;
     }

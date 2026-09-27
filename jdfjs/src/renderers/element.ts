@@ -295,7 +295,13 @@ function colWidthCss(w: string | number | undefined): string | undefined {
 function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "jdfjs-table-wrap";
-  applyStyle(wrap, resolveStyle(el.style, ctx.styles));
+  // `style.fontSize` / `lineHeight` size the cells and `style.padding` is the
+  // cell padding (the PDF importer writes compact values so a converted
+  // statement occupies the same box as the source rows). Same rules as the
+  // reader's TableElement — keep them identical.
+  const tableCss = resolveStyle(el.style, ctx.styles);
+  const { padding: cellPad = "8px 12px", ...wrapCss } = tableCss;
+  applyStyle(wrap, wrapCss);
   wrap.style.overflowX = "auto";
 
   const headerCss = (() => {
@@ -336,7 +342,8 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
   table.style.width = "100%";
   table.style.borderCollapse = "collapse";
   table.style.tableLayout = el.columns?.some((c) => c.width != null) ? "fixed" : "auto";
-  table.style.fontSize = "14px";
+  table.style.fontSize = tableCss["font-size"] || "14px";
+  if (tableCss["line-height"]) table.style.lineHeight = tableCss["line-height"];
   if (borders.outer) table.style.border = `${borders.width || 1}px solid ${borders.color || "#e2e8f0"}`;
 
   // Column widths — honour columns[].width via a <colgroup> so both header
@@ -359,9 +366,11 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
     headers.forEach((h, i) => {
       const th = document.createElement("th");
       th.textContent = h;
-      th.style.padding = "8px 12px";
+      th.style.padding = cellPad;
       th.style.fontWeight = "600";
-      th.style.background = "#f8fafc";
+      // Designed tables get the light header band; a table that brings its own
+      // headerStyle (the PDF importer, hand-authored docs) shows exactly that.
+      if (!el.headerStyle) th.style.background = "#f8fafc";
       th.style.textAlign = colAlign(i) || "left";
       if (borders.inner) th.style.border = `${borders.width || 1}px solid ${borders.color || "#e2e8f0"}`;
       tr.appendChild(th);
@@ -382,13 +391,17 @@ function renderTable(el: TableElement, ctx: RenderContext): HTMLElement {
     const tr = document.createElement("tr");
     applyStyle(tr, rowCss as any);
     if (ri % 2 === 1) applyStyle(tr, altRowCss as any);
+    // A spacer row (every cell empty — the PDF importer keeps a statement's
+    // blank separator lines) must still be one line tall, so it gets a
+    // non-breaking space; an empty cell in a filled row stays empty.
+    const blankRow = row.every((c) => cellText(c) === "");
     row.forEach((cell, ci) => {
       const td = document.createElement("td");
-      td.textContent = cellText(cell);
+      td.textContent = blankRow ? "\u00a0" : cellText(cell);
       const attrs = cellAttrs(cell);
       if (attrs.colspan) td.colSpan = attrs.colspan;
       if (attrs.rowspan) td.rowSpan = attrs.rowspan;
-      td.style.padding = "8px 12px";
+      td.style.padding = cellPad;
       td.style.verticalAlign = "top";
       // Cell-level align wins over the column default.
       td.style.textAlign = cellAlign(cell) || colAlign(ci) || "left";

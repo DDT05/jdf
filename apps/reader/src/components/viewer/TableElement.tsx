@@ -38,7 +38,13 @@ function colWidthCss(w: string | number | undefined): string | undefined {
 
 export function TableElementView(props: TableElementViewProps) {
   const edit = useEdit();
+  // `style.fontSize` / `lineHeight` size the cells and `style.padding` is the
+  // cell padding (the PDF importer writes compact values so a converted
+  // statement occupies the same box as the source rows). Same rules as
+  // jdf.js's renderTable — keep them identical.
   const css = () => resolveStyle(props.element.style, props.styles);
+  const cellPad = () => css()["padding"] ?? "8px 12px";
+  const wrapCss = () => { const { padding: _p, ...rest } = css(); return rest; };
 
   const headerCss = () => {
     const s = props.element.headerStyle;
@@ -111,11 +117,12 @@ export function TableElementView(props: TableElementViewProps) {
   }
 
   return (
-    <div style={css()} class="overflow-x-auto">
+    <div style={wrapCss()} class="overflow-x-auto">
       <table
         class="w-full border-collapse"
         style={{
-          "font-size": "14px",
+          "font-size": css()["font-size"] || "14px",
+          ...(css()["line-height"] ? { "line-height": css()["line-height"] } : {}),
           "table-layout": hasColWidths() ? "fixed" : "auto",
           ...(borders().outer ? { border: `${borders().width || 1}px solid ${borders().color || "#e2e8f0"}` } : {}),
         }}
@@ -133,8 +140,10 @@ export function TableElementView(props: TableElementViewProps) {
               <For each={headers()!}>
                 {(h, i) => (
                   <th
-                    class="px-3 py-2 font-semibold bg-gray-50"
+                    class="font-semibold"
+                    classList={{ "bg-gray-50": !props.element.headerStyle }}
                     style={{
+                      padding: cellPad(),
                       "text-align": props.element.columns?.[i()]?.align || "left",
                       ...(borders().inner ? { border: `${borders().width || 1}px solid ${borders().color || "#e2e8f0"}` } : {}),
                     }}
@@ -160,8 +169,9 @@ export function TableElementView(props: TableElementViewProps) {
                 <For each={row}>
                   {(cell, colIdx) => (
                     <td
-                      class="px-3 py-2 align-top"
+                      class="align-top"
                       style={{
+                        padding: cellPad(),
                         "text-align": cellAlign(cell) || props.element.columns?.[colIdx()]?.align || "left",
                         ...(borders().inner ? { border: `${borders().width || 1}px solid ${borders().color || "#e2e8f0"}` } : {}),
                         ...cellCss(cell),
@@ -174,7 +184,8 @@ export function TableElementView(props: TableElementViewProps) {
                           onCommit={(v) => commitCell(rowIdx(), colIdx(), v)}
                         />
                       ) : (
-                        cellText(cell)
+                        // Spacer row (all cells empty) keeps one line of height, like jdf.js.
+                        row.every((c) => cellText(c) === "") ? "\u00a0" : cellText(cell)
                       )}
                     </td>
                   )}

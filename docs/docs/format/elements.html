@@ -128,9 +128,11 @@
           <tr><td><code>borders</code></td><td>boolean or <code>{outer, inner, color, width}</code></td></tr>
           <tr><td><code>alternatingRowColor</code></td><td>color string</td></tr>
           <tr><td><code>alternateRowStyle</code></td><td>StyleRef</td></tr>
-          <tr><td><code>headerStyle</code> / <code>rowStyle</code></td><td>StyleRef</td></tr>
+          <tr><td><code>headerStyle</code> / <code>rowStyle</code></td><td>StyleRef — <code>rowStyle</code> paints every body row, <code>alternateRowStyle</code> / <code>alternatingRowColor</code> override the odd ones (a statement whose <em>even</em> rows carry the band uses <code>rowStyle</code> + a white <code>alternateRowStyle</code>)</td></tr>
+          <tr><td><code>style</code></td><td>StyleRef — <code>fontSize</code> and <code>lineHeight</code> size the cells; <code>padding</code> (<code>"0.3mm 1mm"</code>, a CSS string or a px number) is the <em>cell</em> padding. Without them a table renders at 14px with 8px/12px cells. The PDF importer writes compact values from the source row pitch so a converted statement occupies the same box as the PDF's rows. A row whose cells are all empty is a one-line spacer.</td></tr>
         </tbody>
       </table>
+      <p>Example of an imported statement: <a href="https://github.com/uurtech/jdf/blob/master/spec/examples/financial-statement.jdf">spec/examples/financial-statement.jdf</a>.</p>
 <pre><code><span class="punc">{</span> <span class="key">"type"</span><span class="punc">:</span> <span class="str">"table"</span><span class="punc">,</span>
   <span class="key">"headers"</span><span class="punc">:</span> <span class="punc">[</span><span class="str">"Quarter"</span><span class="punc">,</span> <span class="str">"Revenue"</span><span class="punc">,</span> <span class="str">"YoY"</span><span class="punc">],</span>
   <span class="key">"borders"</span><span class="punc">:</span> <span class="punc">{</span> <span class="key">"outer"</span><span class="punc">:</span> <span class="key">true</span><span class="punc">,</span> <span class="key">"inner"</span><span class="punc">:</span> <span class="key">true</span><span class="punc">,</span> <span class="key">"color"</span><span class="punc">:</span> <span class="str">"#e2e8f0"</span> <span class="punc">},</span>

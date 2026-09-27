@@ -148,12 +148,15 @@ export function serializeElement(el: Element): string {
           .map((c, i) => {
             const h = headers[i];
             const v = cell(c).trim();
+            if (!v) return ""; // an empty cell (blank "Note", spacer row) carries nothing to retrieve
             return h ? `${h}: ${v}` : v;
           })
           .filter((s) => s !== "")
           .join(" | "),
       );
-      return lines.join("\n");
+      // Spacer rows (the PDF importer keeps a statement's blank separator lines
+      // as empty rows for layout) carry no text.
+      return lines.filter((l) => l !== "").join("\n");
     }
     case "collapsible": {
       const title = String(e.title ?? "").trim();

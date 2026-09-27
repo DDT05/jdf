@@ -56,7 +56,8 @@ export interface DetectedTable {
 
 const PT_TO_MM = 0.352778;
 
-interface Cell { run: TRun; idx: number; x0: number; x1: number; }
+interface CellPart { text: string; x0: number; x1: number; idx: number[] }
+interface Cell { run: TRun; idx: number; x0: number; x1: number; parts?: CellPart[] }
 interface Row { y: number; h: number; cells: Cell[]; }
 
 /** Average glyph advance (in em) measured on this page from runs whose width
@@ -99,6 +100,17 @@ function textExtent(r: TRun, k: number, stretched: boolean): number {
   return Math.max(em * 0.5, r.width > est * 1.4 ? est : r.width);
 }
 
+/** A cell value that means "number" for column alignment and header
+ *  detection: 13,756 · (8,953) · $ 2,701 · 58% · 0.43 · — (dash placeholder). */
+const numeric = (s: string) => {
+  const t = s.trim();
+  if (!t) return false;
+  if (/^[—–\-]+$/.test(t)) return true;
+  const core = t.replace(/[\s$€£¥(),%]/g, "").replace(/^[+\-−–]/, "");
+  return /^\d+(\.\d+)?(ms|s|k|m|b|M|K|B|x|×)?$/.test(core);
+};
+const isCurrencySymbol = (s: string) => /^[$€£¥]$/.test(s.trim());
+
 function groupRows(runs: TRun[], skip: (r: TRun) => boolean): Row[] {
   const k = calibrateGlyphWidth(runs);
   const stretched = hasStretchedSpaces(runs, k);
@@ -120,131 +132,252 @@ function groupRows(runs: TRun[], skip: (r: TRun) => boolean): Row[] {
   for (const row of rows) {
     row.cells.sort((a, b) => a.x0 - b.x0);
     // Re-join runs the importer kept apart inside one cell ("HR " + "& benefits":
-    // a glyph from another font subset, a colour change, a kerning gap). Cells of
-    // a real table are separated by far more than one em.
+    // a glyph from another font subset, a colour change, a kerning gap); cells
+    // of a table are further apart than one em. Two adjacent numbers ("11,182
+    // $(133,709)") are two columns even when typeset a third of an em apart,
+    // so numeric neighbours only merge when they nearly touch. A lone currency sign belongs to the number on its
+    // right ("$      2,701" in a 10-K is one cell), however wide the gap.
     const merged: Cell[] = [];
-    for (const c of row.cells) {
+    let pendingSym: Cell | null = null;
+    const pushCell = (c: Cell) => {
       const last = merged[merged.length - 1];
       const em = c.run.fontSize * PT_TO_MM;
-      if (last && c.x0 - last.x1 <= em * 1.0) {
+      const limit = last && numeric(last.run.text) && numeric(c.run.text) ? em * 0.35 : em * 1.0;
+      if (last && c.x0 - last.x1 <= limit) {
+        last.parts = [...(last.parts ?? [{ text: last.run.text, x0: last.x0, x1: last.x1, idx: [last.idx, ...(((last as any).extra ?? []) as number[])] }]),
+          { text: c.run.text, x0: c.x0, x1: c.x1, idx: [c.idx, ...(((c as any).extra ?? []) as number[])] }];
         last.x1 = Math.max(last.x1, c.x1);
         last.run = { ...last.run, text: `${last.run.text.replace(/\s+$/, "")} ${c.run.text.replace(/^\s+/, "")}`, width: last.x1 - last.x0 };
-        (last as any).extra = [...((last as any).extra ?? []), c.idx];
+        (last as any).extra = [...((last as any).extra ?? []), c.idx, ...(((c as any).extra ?? []) as number[])];
       } else merged.push({ ...c });
+    };
+    for (const c of row.cells) {
+      if (isCurrencySymbol(c.run.text)) { if (pendingSym) merged.push(pendingSym); pendingSym = { ...c }; continue; }
+      if (pendingSym) {
+        const em = c.run.fontSize * PT_TO_MM;
+        if (numeric(c.run.text) && c.x0 - pendingSym.x1 <= em * 8) {
+          const cell: Cell = { ...c, run: { ...c.run, text: `${pendingSym.run.text.trim()} ${c.run.text.trim()}` } };
+          (cell as any).extra = [...(((c as any).extra ?? []) as number[]), pendingSym.idx, ...(((pendingSym as any).extra ?? []) as number[])];
+          pendingSym = null;
+          pushCell(cell);
+          continue;
+        }
+        merged.push(pendingSym); pendingSym = null;
+      }
+      pushCell(c);
     }
+    if (pendingSym) merged.push(pendingSym);
     row.cells = merged;
   }
   return rows;
 }
 
-/** Cluster cells of several rows into column bands by x-interval overlap. Returns bands or null when a row has two cells in one band. */
-function columnBands(rows: Row[]): { x0: number; x1: number }[] | null {
-  const cells = rows.flatMap((r) => r.cells);
-  const sorted = cells.slice().sort((a, b) => a.x0 - b.x0);
-  const bands: { x0: number; x1: number; members: Cell[] }[] = [];
-  for (const c of sorted) {
+interface BandInfo { x0: number; x1: number }
+interface BandResult { bands: BandInfo[]; assign: Map<Cell, number> }
+
+const overlaps = (c: { x0: number; x1: number }, b: BandInfo) => c.x0 < b.x1 - 0.2 && c.x1 > b.x0 + 0.2;
+
+/** Overlap-cluster cells into x-bands (sorted left → right). */
+function clusterCells(cells: { c: Cell; r: Row }[]): { x0: number; x1: number; members: { c: Cell; r: Row }[] }[] {
+  const sorted = cells.slice().sort((a, b) => a.c.x0 - b.c.x0);
+  const bands: { x0: number; x1: number; members: { c: Cell; r: Row }[] }[] = [];
+  for (const m of sorted) {
     const last = bands[bands.length - 1];
     // Overlap test with a small tolerance so kerning drift doesn't split a column.
-    if (last && c.x0 <= last.x1 - 0.2) { last.x1 = Math.max(last.x1, c.x1); last.members.push(c); }
-    else bands.push({ x0: c.x0, x1: c.x1, members: [c] });
+    if (last && m.c.x0 <= last.x1 - 0.2) { last.x1 = Math.max(last.x1, m.c.x1); last.members.push(m); }
+    else bands.push({ x0: m.c.x0, x1: m.c.x1, members: [m] });
   }
+  return bands;
+}
+/** Two cells of one row in one band → not a grid. */
+function hasConflict(bands: { members: { c: Cell; r: Row }[] }[]): boolean {
   for (const b of bands) {
-    const rowsSeen = new Set<Row>();
-    for (const m of b.members) {
-      const row = rows.find((r) => r.cells.includes(m))!;
-      if (rowsSeen.has(row)) return null; // two cells of one row in the same band → not a grid
-      rowsSeen.add(row);
-    }
+    const seen = new Set<Row>();
+    for (const m of b.members) { if (seen.has(m.r)) return true; seen.add(m.r); }
   }
-  return bands.map(({ x0, x1 }) => ({ x0, x1 }));
+  return false;
 }
 
-const numeric = (s: string) => /^[\s$€£¥+\-−–]*[\d.,]+\s*(%|ms|s|k|m|b|M|K|B|x|×)?\s*(\/\w+)?$/i.test(s.trim()) || /^[+\-−]?\d/.test(s.trim()) && /\d$/.test(s.trim().replace(/[%)]$/, ""));
+/**
+ * Cluster the cells of several rows into column bands. Returns null when the
+ * rows cannot form a grid (two cells of one row land in one band).
+ *
+ * Financial statements break naive x-overlap clustering in three ways, all
+ * handled here:
+ *  - Long row labels ("Total net interest income and income from Islamic
+ *    financing…") run under the next column's numbers. A row's first cell
+ *    that starts left of every other cell is a *label* and always belongs to
+ *    column 0, whatever its extent.
+ *  - Group headers ("Common Stock" over "Shares | Amount", "Stage 1" over
+ *    "Exposure | Provision") span bands. Bands are built from the rows with
+ *    the most cells (the finest structure) and every other cell joins the
+ *    band it overlaps most.
+ *  - Column headers are centred while the numbers below are right-aligned,
+ *    so "2025" and "2,701" may not overlap at all. Adjacent bands that never
+ *    share a row and sit within 1.5 em are one column.
+ */
+function columnBands(rows: Row[]): BandResult | null {
+  const all = rows.flatMap((r) => r.cells.map((c) => ({ c, r })));
+  if (!all.length) return null;
+  const firstOf = new Set(rows.map((r) => r.cells[0]));
+  const others = all.filter((m) => !firstOf.has(m.c));
+  const othersMin = others.length ? Math.min(...others.map((m) => m.c.x0)) : Infinity;
+  // A numeric first cell ("2023" continuing "Balances, December 31,") is a
+  // label only when it lines up with the textual labels; "2025" heading a
+  // column of numbers is not.
+  // "Clearly left" = more than 1.5 em: the leftmost header of a numeric
+  // column starts a little left of the right-aligned numbers under it.
+  const leftOf = (m: { c: Cell }) => m.c.x0 < othersMin - Math.max(1, m.c.run.fontSize * PT_TO_MM * 1.5);
+  const textLabels = all.filter((m) => firstOf.has(m.c) && leftOf(m) && !numeric(m.c.run.text));
+  const labelX = textLabels.length ? Math.min(...textLabels.map((m) => m.c.x0)) : Infinity;
+  const isLabel = (m: { c: Cell }) => firstOf.has(m.c) && leftOf(m) && (!numeric(m.c.run.text) || m.c.x0 <= labelX + m.c.run.fontSize * PT_TO_MM * 3);
+  const body = all.filter((m) => !isLabel(m));
+  const labels = all.filter(isLabel);
+  if (!body.length) return null;
+  const assign = new Map<Cell, number>();
+
+  const countOf = new Map<Row, number>();
+  for (const m of body) countOf.set(m.r, (countOf.get(m.r) ?? 0) + 1);
+  const maxCount = Math.max(...countOf.values());
+  const anchorRows = new Set(rows.filter((r) => countOf.get(r) === maxCount));
+  let bands = clusterCells(body.filter((m) => anchorRows.has(m.r)));
+  if (hasConflict(bands)) {
+    // Even the finest rows disagree (one of them carries a spanning cell):
+    // let the first of them alone define the grid.
+    const first = rows.find((r) => anchorRows.has(r))!;
+    bands = clusterCells(body.filter((m) => m.r === first));
+    if (hasConflict(bands)) return null;
+  }
+  for (const m of body) {
+    if (anchorRows.has(m.r)) continue;
+    // Best overlapping band that has no cell of this row yet; a cell that
+    // overlaps only occupied bands (or none) opens a sparse column of its own.
+    let bi = -1, bestOv = 0;
+    bands.forEach((b, k) => {
+      if (b.members.some((o) => o.r === m.r)) return;
+      const ov = Math.min(m.c.x1, b.x1) - Math.max(m.c.x0, b.x0);
+      if (ov > bestOv) { bestOv = ov; bi = k; }
+    });
+    if (bi < 0) {
+      // No free band: a new column is fine in the gaps between columns, but a
+      // cell sitting on top of an occupied band ("to" under a long line of
+      // cover-page text) means these rows are not a grid.
+      const w = m.c.x1 - m.c.x0;
+      if (bands.some((b) => Math.min(m.c.x1, b.x1) - Math.max(m.c.x0, b.x0) > w * 0.5)) return null;
+      bands.push({ x0: m.c.x0, x1: m.c.x1, members: [m] });
+      continue;
+    }
+    bands[bi].members.push(m);
+    // A cell inside one band may widen it; a spanning header ("Accumulated
+    // Comprehensive Stockholders'" over three columns) must not, or the band
+    // would swallow its neighbours.
+    const touched = bands.filter((b) => overlaps(m.c, b)).length;
+    if (touched <= 1) { bands[bi].x0 = Math.min(bands[bi].x0, m.c.x0); bands[bi].x1 = Math.max(bands[bi].x1, m.c.x1); }
+  }
+  bands.sort((a, b) => a.x0 - b.x0);
+  // Coalesce a centred header with the right-aligned numbers under it.
+  for (let k = 0; k + 1 < bands.length;) {
+    const a = bands[k], b = bands[k + 1];
+    const shareRow = a.members.some((m) => b.members.some((o) => o.r === m.r));
+    const em = Math.min(...[...a.members, ...b.members].map((m) => m.c.run.fontSize)) * PT_TO_MM;
+    // Two real columns share rows (a row has a value in both); bands that
+    // never do and sit this close are one column (a centred header over
+    // right-aligned numbers, a dash under a wider number).
+    if (!shareRow && b.x0 - a.x1 <= em * 1.5) {
+      bands.splice(k, 2, { x0: a.x0, x1: Math.max(a.x1, b.x1), members: [...a.members, ...b.members] });
+    } else k++;
+  }
+  const out: BandInfo[] = [];
+  if (labels.length) {
+    const lx0 = Math.min(...labels.map((m) => m.c.x0));
+    const lx1 = Math.min(Math.max(...labels.map((m) => m.c.x1)), bands[0].x0 - 0.2);
+    out.push({ x0: lx0, x1: Math.max(lx1, lx0 + 1) });
+    for (const m of labels) assign.set(m.c, 0);
+  }
+  const off = out.length;
+  bands.forEach((b, k) => { out.push({ x0: b.x0, x1: b.x1 }); for (const m of b.members) assign.set(m.c, k + off); });
+  return { bands: out, assign };
+}
 
 /** Column gutters of a multi-column page (see columns.ts); a candidate whose
  *  bands sit on both sides of a gutter with prose-wide cells is column text. */
 export interface GutterHint { x0: number; x1: number; }
+
+const dbg = (...a: unknown[]) => { if (typeof process !== "undefined" && process.env?.JDF_TABLE_DEBUG) console.error("[tables]", ...a); };
 
 export function detectTables(runs: TRun[], shapes: TShape[], pageWidthMm: number, gutters: GutterHint[] = []): DetectedTable[] {
   const out: DetectedTable[] = [];
   const used = new Set<number>();
   const rows = groupRows(runs, () => false);
   const pageW = pageWidthMm;
+  const emOf = (c: Cell) => c.run.fontSize * PT_TO_MM;
 
   let i = 0;
   while (i < rows.length) {
     if (rows[i].cells.length < 2) { i++; continue; }
+    dbg(`block from "${rows[i].cells.map((c) => c.run.text.slice(0, 14)).join(" | ")}"`);
     // Grow the block while the column structure stays consistent.
     let j = i;
     let cur = columnBands([rows[i]]);
-    let best: { j: number; bands: { x0: number; x1: number }[] } | null = null;
+    let best: { j: number; res: BandResult } | null = null;
+    let loneStreak = 0;
     while (j + 1 < rows.length && cur) {
       const next = rows[j + 1];
       const gap = next.y - (rows[j].y + rows[j].h);
       const rowH = Math.max(rows[j].h, next.h);
-      if (gap > rowH * 2.2) break;                      // vertical gap too large → new paragraph/table
+      // An established block (3+ rows) may span a blank separator line
+      // (financial statements group rows with white space); a young one may not.
+      const established = !!best && best.j - i >= 2;
+      if (gap > rowH * (established ? 3.4 : 2.2)) { dbg(`break: gap ${gap.toFixed(1)} after "${rows[j].cells[0].run.text.slice(0, 30)}"`); break; }
+      const bands = cur.bands;
       if (next.cells.length === 1) {
-        // Continuation line of a wrapped cell? Only if it sits inside an existing non-first band.
         const c = next.cells[0];
-        const inBand = cur.findIndex((b) => c.x0 < b.x1 - 0.2 && c.x1 > b.x0 + 0.2);
-        const spansSeveral = cur.filter((b) => c.x0 < b.x1 - 0.2 && c.x1 > b.x0 + 0.2).length > 1;
-        if (inBand <= 0 || spansSeveral) break;         // a lone line in the first column or across columns ends the table
-        j++;                                            // keep as continuation; bands unchanged
-        continue;
+        const inBands = bands.filter((b) => overlaps(c, b));
+        const inBand = inBands.length ? bands.indexOf(inBands[0]) : -1;
+        const spansSeveral = inBands.length > 1;
+        if (inBand > 0 && !spansSeveral) { j++; continue; } // continuation line of a wrapped cell
+        // A lone line starting in the label column that stops short of the
+        // last column: a wrapped label (10-K labels wrap onto up to four lines
+        // before the values) or a section label ("Net profit attributable
+        // to:"). Kept as a spanning label row; trailing ones are trimmed
+        // because `best` only advances on multi-cell rows.
+        const isLabel = c.x1 <= bands[bands.length - 1].x0 - 0.5 && (c.x0 <= bands[0].x0 + emOf(c) * 3 || c.x1 < bands[0].x0 - 0.5);
+        if (isLabel && loneStreak < 4) { loneStreak++; j++; continue; }
+        dbg(`break: lone line "${c.run.text.slice(0, 40)}" inBand=${inBand} spans=${spansSeveral} label=${isLabel} streak=${loneStreak}`);
+        break;
       }
+      loneStreak = 0;
       const nb = columnBands(rows.slice(i, j + 2));
-      if (!nb || nb.length < 2) break;
-      // A row may only add a column while the block is still short (header rows with fewer cells).
-      if (nb.length > cur.length && j - i >= 2) break;
+      if (!nb || nb.bands.length < 2) { dbg(`break: no bands at "${next.cells.map((c) => c.run.text.slice(0, 15)).join(" | ")}"`); break; }
+      if (nb.bands.length > bands.length && j - i >= 2) {
+        // A row may add a column late only when the new column is narrow
+        // (a sparse "Note" column first used far down the statement); a wide
+        // new band means the structure changed → the table ends here.
+        const fresh = nb.bands.filter((b) => !bands.some((o) => overlaps(b, o)) && b.x0 > bands[0].x0);
+        if (fresh.some((b) => b.x1 - b.x0 > 20)) { dbg(`break: wide fresh band at "${next.cells.map((c) => c.run.text.slice(0, 15)).join(" | ")}"`); break; }
+      }
       cur = nb; j++;
-      if (cur.length >= 2) best = { j, bands: cur };
+      if (cur.bands.length >= 2) best = { j, res: cur };
     }
-    const multiRows = best ? rows.slice(i, best.j + 1).filter((r) => r.cells.length >= 2).length : 0;
     const blockRows = best ? rows.slice(i, best.j + 1) : [];
+    const multiRows = blockRows.filter((r) => r.cells.length >= 2).length;
     // Lattice evidence: drawn rects/lines within the block's bbox.
     const bbox = blockRows.length ? {
-      x0: Math.min(...best!.bands.map((b) => b.x0)) - 5, x1: Math.max(...best!.bands.map((b) => b.x1)) + 5,
+      x0: Math.min(...best!.res.bands.map((b) => b.x0)) - 5, x1: Math.max(...best!.res.bands.map((b) => b.x1)) + 5,
       // Cell padding puts backgrounds/borders well above the first baseline and below the last.
       y0: blockRows[0].y - blockRows[0].h * 2.5, y1: blockRows[blockRows.length - 1].y + blockRows[blockRows.length - 1].h * 3,
     } : null;
     const gridShapes = bbox ? shapes.map((s, k) => ({ s, k })).filter(({ s }) =>
       s.x >= bbox.x0 - 1 && s.x + s.width <= bbox.x1 + 1 && s.y >= bbox.y0 - 1 && s.y + s.height <= bbox.y1 + 1 &&
       (s.kind === "line" || s.kind === "rect")) : [];
-    const hasLattice = gridShapes.length >= 3;
-
-    if (!best || multiRows < (hasLattice ? 2 : 3) || best.bands.length < 2) { i++; continue; }
-    // Two columns of justified prose form perfectly consistent x-bands. If a
-    // gutter runs between two adjacent bands and both bands are wide enough to
-    // hold a sentence (> 30 mm), this is column text, not a table. Genuine
-    // full-width tables have narrow cells on at least one side.
-    if (gutters.length && !hasLattice) {
-      const b = best.bands;
-      const straddles = b.some((band, k) => k < b.length - 1 && gutters.some((g) => band.x1 <= g.x1 + 1 && b[k + 1].x0 >= g.x0 - 1) && (band.x1 - band.x0) > 30 && (b[k + 1].x1 - b[k + 1].x0) > 30);
-      if (straddles) { i++; continue; }
-    }
-
-    // ── build the element ──────────────────────────────────────────────────
-    const bands = best.bands;
-    const cellText = (row: Row, b: number) => row.cells
-      .filter((c) => c.x0 < bands[b].x1 - 0.2 && c.x1 > bands[b].x0 + 0.2)
-      .map((c) => c.run.text.trim()).join(" ").trim();
-    const grid: string[][] = [];
-    const lineIdx: number[] = [];
-    for (const row of blockRows) {
-      if (row.cells.length === 1 && grid.length) {
-        // Continuation of a wrapped cell → append to the same column of the previous row.
-        const c = row.cells[0];
-        const b = bands.findIndex((bb) => c.x0 < bb.x1 - 0.2 && c.x1 > bb.x0 + 0.2);
-        if (b > 0) { grid[grid.length - 1][b] = (grid[grid.length - 1][b] + " " + c.run.text.trim()).trim(); lineIdx.push(c.idx, ...(((c as any).extra ?? []) as number[])); continue; }
-      }
-      grid.push(bands.map((_, b) => cellText(row, b)));
-      for (const c of row.cells) { lineIdx.push(c.idx); for (const k of ((c as any).extra ?? []) as number[]) lineIdx.push(k); }
-    }
-    if (lineIdx.some((k) => used.has(k))) { i = best.j + 1; continue; }
-
-    // Header: first row is a header when its runs are bold, or when a filled band covers exactly that row.
-    const first = blockRows[0];
-    const tableW = bbox!.x1 - bbox!.x0;
+    const tableW = bbox ? bbox.x1 - bbox.x0 : 0;
+    const isRule = (s: TShape) => s.kind === "line" || (s.kind === "rect" && (s.height < 0.6 || s.width < 0.6) && !!(s.fill || s.stroke));
+    // Horizontal rules spanning the block (cell borders) tell wrapped rows apart
+    // from new rows far more reliably than baseline pitch.
+    const ruleYs = gridShapes
+      .filter(({ s }) => isRule(s) && s.width >= s.height && s.width >= tableW * 0.45)
+      .map(({ s }) => s.y + s.height / 2).sort((a, b) => a - b);
+    const verticalRules = blockRows.length ? gridShapes.filter(({ s }) => isRule(s) && s.height > s.width && s.height >= blockRows[0].h * 1.5).length : 0;
     // Background fill of a row = the non-white filled rects that cover the
     // row's vertical centre (one wide rect, or one per cell as browsers print).
     const rowFill = (row: Row): { fill: string; rects: { s: TShape; k: number }[] } | null => {
@@ -257,59 +390,293 @@ export function detectTables(runs: TRun[], shapes: TShape[], pageWidthMm: number
       const fill = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
       return { fill, rects };
     };
+    const filledRows = blockRows.filter((r) => rowFill(r)).length;
+    // Lattice = drawn table structure: vertical rules, several rules spanning
+    // the block, or filled rows. Any three shapes nearby (a cover page's
+    // section rules, a chart) are not.
+    const hasLattice = verticalRules >= 2 || ruleYs.length >= 3 || filledRows >= 2;
+
+    if (!best || multiRows < (hasLattice ? 2 : 3) || best.res.bands.length < 2) { if (best) dbg(`reject: ${multiRows} multi rows from "${rows[i].cells[0].run.text.slice(0, 30)}"`); i++; continue; }
+    // Two columns of justified prose form perfectly consistent x-bands. If a
+    // gutter runs between two adjacent bands and both bands are wide enough to
+    // hold a sentence (> 30 mm), this is column text, not a table. Genuine
+    // full-width tables have narrow cells on at least one side.
+    if (gutters.length && !hasLattice) {
+      const b = best.res.bands;
+      // Any sentence-wide band on each side of a gutter (not only the two
+      // adjacent ones: a stray word that landed in the gutter must not hide it).
+      const straddles = gutters.some((g) => b.some((band) => band.x1 <= g.x1 + 1 && band.x1 - band.x0 > 30) && b.some((band) => band.x0 >= g.x0 - 1 && band.x1 - band.x0 > 30));
+      if (straddles) { dbg("reject: straddles a column gutter"); i++; continue; }
+    }
+
+    // ── build the element ──────────────────────────────────────────────────
+    const { bands, assign } = best.res;
+    const ruleBetween = (a: Row, b: Row) => { const y0 = a.y + a.h * 0.5, y1 = b.y + b.h * 0.5; return ruleYs.some((y) => y > y0 && y < y1); };
+    // Only a per-row lattice can tell wrapped rows apart; a statement's few
+    // total underlines cannot.
+    const denseRules = ruleYs.length >= Math.max(2, multiRows * 0.6);
+
+    // "Item 1A." + "Risk Factors" merged into one cell because the gap was
+    // under an em, while the rows around them keep the title in the next
+    // column: give the tail back to the empty neighbouring band.
+    for (const row of blockRows) {
+      for (const c of row.cells.slice()) {
+        const b = assign.get(c);
+        if (b == null || b + 1 >= bands.length) continue;
+        if (row.cells.some((o) => o !== c && assign.get(o) === b + 1)) continue;
+        const nextX0 = bands[b + 1].x0;
+        let cut: number;
+        if (!c.parts) {
+          // Merged before it reached us (one PDF.js item, or a sub-half-em gap):
+          // cut at the space nearest to where the next column starts.
+          const w = c.x1 - c.x0;
+          if (c.x1 <= nextX0 + w * 0.3 || !/\s/.test(c.run.text.trim())) continue;
+          const text = c.run.text.trim();
+          const at = Math.round(((nextX0 - c.x0) / w) * text.length);
+          let best = -1;
+          for (let q = 0; q < text.length; q++) if (text[q] === " " && (best < 0 || Math.abs(q - at) < Math.abs(best - at))) best = q;
+          if (best <= 0 || best >= text.length - 1 || Math.abs(best - at) > text.length * 0.25) continue;
+          const perChar = w / text.length;
+          c.parts = [
+            { text: text.slice(0, best), x0: c.x0, x1: c.x0 + best * perChar, idx: [c.idx, ...(((c as any).extra ?? []) as number[])] },
+            { text: text.slice(best + 1), x0: c.x0 + (best + 1) * perChar, x1: c.x1, idx: [c.idx] },
+          ];
+          cut = 1; // the estimate was made at the band edge by construction
+        } else {
+          cut = c.parts.findIndex((p) => p.x0 >= nextX0 - 0.5);
+        }
+        if (cut <= 0) continue;
+        const head = c.parts.slice(0, cut), tail = c.parts.slice(cut);
+        const tailCell: Cell = { run: { ...c.run, text: tail.map((p) => p.text.trim()).join(" ") }, idx: tail[0].idx[0], x0: tail[0].x0, x1: tail[tail.length - 1].x1, parts: tail };
+        (tailCell as any).extra = tail.flatMap((p) => p.idx).filter((k) => k !== tailCell.idx);
+        c.run = { ...c.run, text: head.map((p) => p.text.trim()).join(" ") };
+        c.x1 = head[head.length - 1].x1; c.idx = head[0].idx[0]; (c as any).extra = head.flatMap((p) => p.idx).filter((k) => k !== c.idx); c.parts = head.length > 1 ? head : undefined;
+        row.cells.push(tailCell); assign.set(tailCell, b + 1);
+      }
+      row.cells.sort((a, b2) => a.x0 - b2.x0);
+    }
+    // Dot leaders ("Business . . . . . . 4") carry no text.
+    const clean = (t: string) => t.replace(/(?:\s*\.){3,}\s*$/, "").replace(/\s+/g, " ").trim();
+    const cellText = (row: Row, b: number) => clean(row.cells
+      .filter((c) => assign.get(c) === b)
+      .map((c) => c.run.text.trim()).join(" "));
+    const cellIdx = (c: Cell) => [c.idx, ...(((c as any).extra ?? []) as number[])];
+    const grid: string[][] = [];
+    const gridRows: Row[] = [];   // source row of each grid row (first line)
+    const lineIdx: number[] = [];
+    const pitches: number[] = [];
+    for (let r = 1; r < blockRows.length; r++) pitches.push(blockRows[r].y - blockRows[r - 1].y);
+    const medPitch = pitches.length ? pitches.slice().sort((a, b) => a - b)[Math.floor(pitches.length / 2)] : blockRows[0].h * 1.3;
+    let pendingLabel: { text: string; idx: number[]; row: Row } | null = null;
+    const flushPending = () => {
+      if (!pendingLabel) return;
+      const cells = bands.map(() => ""); cells[0] = pendingLabel.text;
+      grid.push(cells); gridRows.push(pendingLabel.row); lineIdx.push(...pendingLabel.idx); pendingLabel = null;
+    };
+    for (let r = 0; r < blockRows.length; r++) {
+      const row = blockRows[r];
+      if (row.cells.length === 1 && grid.length + (pendingLabel ? 1 : 0) > 0) {
+        const c = row.cells[0];
+        const b = assign.get(c) ?? bands.findIndex((bb) => overlaps(c, bb));
+        if (b > 0) {
+          // Continuation of a wrapped cell → append to the same column of the previous row.
+          flushPending();
+          grid[grid.length - 1][b] = (grid[grid.length - 1][b] + " " + c.run.text.trim()).trim();
+          lineIdx.push(...cellIdx(c));
+          continue;
+        }
+        // Lone label line: the tail of the previous row's label (no rule between
+        // them / starts lowercase or "("), the head of the next row's label
+        // (next label starts lowercase), or a section label of its own.
+        const text = clean(c.run.text);
+        const prev = gridRows[gridRows.length - 1];
+        const nextRow = blockRows[r + 1];
+        const nextLabel = nextRow && nextRow.cells.length >= 2 ? cellText(nextRow, 0) : "";
+        const lower = /^[(\[a-zà-ÿ]/.test(text);
+        const attachPrev = !pendingLabel && prev && grid.length && (denseRules ? !ruleBetween(prev, row) : lower);
+        if (attachPrev) { grid[grid.length - 1][0] = (grid[grid.length - 1][0] + " " + text).trim(); lineIdx.push(...cellIdx(c)); continue; }
+        const attachNext = nextLabel && (denseRules ? !ruleBetween(row, nextRow) : /^[a-zà-ÿ]/.test(nextLabel) || !/[.:]$/.test(text) && row.cells[0].x0 <= bands[0].x0 + emOf(c) * 0.5 && nextRow.y - row.y <= medPitch * 1.25);
+        if (pendingLabel) { pendingLabel.text = `${pendingLabel.text} ${text}`; pendingLabel.idx.push(...cellIdx(c)); }
+        else pendingLabel = { text, idx: cellIdx(c), row };
+        if (!attachNext) flushPending();
+        continue;
+      }
+      // Blank separator line between groups → an empty spacer row keeps the
+      // vertical rhythm of the statement when rendered.
+      const prevRow = gridRows[gridRows.length - 1];
+      if (prevRow && !pendingLabel && row.y - prevRow.y > medPitch * 1.7 && grid.length) { grid.push(bands.map(() => "")); gridRows.push(row); }
+      const cells = bands.map((_, b) => cellText(row, b));
+      if (pendingLabel) { cells[0] = `${pendingLabel.text} ${cells[0]}`.trim(); lineIdx.push(...pendingLabel.idx); pendingLabel = null; }
+      grid.push(cells); gridRows.push(row);
+      for (const c of row.cells) lineIdx.push(...cellIdx(c));
+    }
+    flushPending();
+    // A row with no label whose predecessor has no values is the wrapped
+    // second line of that predecessor ("Item 5. Market For … Equity" /
+    // "Securities 33").
+    for (let r = 1; r < grid.length; r++) {
+      const cur = grid[r], prev = grid[r - 1];
+      if (cur[0] !== "" || !prev[0] || !prev.some(Boolean) || !cur.some(Boolean)) continue;
+      const last = bands.length - 1;
+      if (prev[last] !== "" || cur[last] === "") continue;
+      if (prev.slice(1).some((v, k) => v && cur[k + 1] && numeric(v) && numeric(cur[k + 1]))) continue;
+      for (let k = 0; k < bands.length; k++) prev[k] = [prev[k], cur[k]].filter(Boolean).join(" ");
+      grid.splice(r, 1); gridRows.splice(r, 1); r--;
+    }
+    while (grid.length && grid[grid.length - 1].every((c) => !c)) { grid.pop(); gridRows.pop(); }
+    if (lineIdx.some((k) => used.has(k))) { i = best.j + 1; continue; }
+
+    // Numeric columns: at least two numeric cells and 60% of the non-empty ones.
+    const isNumCol = bands.map((_, k) => {
+      const vals = grid.map((r) => r[k]).filter(Boolean);
+      const n = vals.filter(numeric).length;
+      return n >= 2 && n / vals.length >= 0.6;
+    });
+    const numCols = isNumCol.filter(Boolean).length;
+    // A two-column, three-line block of prose with no ruling and no numbers
+    // (a résumé's side-by-side sections, a caption next to a figure) is not a table.
+    // Without ruling and without a numeric column, only a solid block of
+    // aligned rows is a table; a cover page's two-column address block, a
+    // résumé's side-by-side sections or a caption beside a figure are not.
+    const hasLoneLabel = blockRows.some((r) => r.cells.length === 1 && (assign.get(r.cells[0]) ?? -1) === 0);
+    // Horizontal rules alone only count as structure when numbers sit between
+    // them (a statement); a cover page's section rules around text do not.
+    const structural = verticalRules >= 2 || filledRows >= 2 || (ruleYs.length >= 3 && numCols > 0);
+    // …and its rows must agree on the cell count: prose lines that happen to
+    // align do not, a real text table does.
+    const counts = new Set(blockRows.filter((r) => r.cells.length >= 2).map((r) => r.cells.length));
+    if (!structural && numCols === 0 && (multiRows < 4 || hasLoneLabel || counts.size > 1 || bands.length === 2 && grid.length <= 3)) { dbg("reject text block", grid[0]); i++; continue; }
+
+    // Header: first row is a header when its runs are bold, or when a filled band covers exactly that row.
+    const first = blockRows[0];
     const headerBg = rowFill(first);
     const firstBold = first.cells.every((c) => c.run.bold);
     const bodyFills = blockRows.slice(1).map(rowFill);
     const headerDistinct = !!headerBg && !bodyFills.every((f) => f?.fill === headerBg.fill);
-    const isHeader = headerDistinct || (firstBold && !blockRows.slice(1).every((r) => r.cells.every((c) => c.run.bold)));
+    let headerRows = (headerDistinct || (firstBold && !blockRows.slice(1).every((r) => r.cells.every((c) => c.run.bold)))) ? 1 : 0;
+    // Consecutive leading rows set entirely in bold are the header when the
+    // body is not ("Legal Name / Country of / Incorporation" over regular rows).
+    const rowBold = (r: Row) => r.cells.every((c) => c.run.bold);
+    if (!blockRows.every(rowBold)) {
+      let b = 0;
+      while (b < Math.min(5, gridRows.length - 1) && gridRows[b] && rowBold(gridRows[b]) && grid[b].some(Boolean)) b++;
+      headerRows = Math.max(headerRows, b);
+    }
+    // In a ruled table every line above the first rule that has body rows under
+    // it belongs to the header (a three-line header shares one cell box).
+    if (denseRules && ruleYs.length) {
+      const firstRule = ruleYs.find((y) => y > gridRows[0].y + gridRows[0].h * 0.5);
+      if (firstRule != null) {
+        const above = gridRows.filter((r) => r.y + r.h * 0.5 < firstRule).length;
+        if (above >= 1 && above <= 5 && gridRows.length - above >= 2) headerRows = Math.max(headerRows, above);
+      }
+    }
+    // Multi-line column headers ("31 Mar 2026" / "AED million", "Additional" /
+    // "Paid-In" / "Capital"): leading rows whose cells in the numeric columns
+    // are all non-numeric, as long as at least two body rows remain.
+    if (numCols > 0) {
+      let h = 0;
+      while (h < Math.min(5, grid.length - 2)) {
+        const row = grid[h];
+        const nonEmpty = row.filter(Boolean);
+        if (!nonEmpty.length) break;
+        const numericHere = row.some((v, k) => isNumCol[k] && v && numeric(v));
+        if (numericHere) break;
+        // Header cells sit in the numeric columns (or the row is styled as a header).
+        if (!row.some((v, k) => isNumCol[k] && v) && h >= headerRows) break;
+        h++;
+      }
+      headerRows = Math.max(headerRows, h);
+    }
+    if (headerRows > 0 && grid.length - headerRows < 1) headerRows = 0;
 
-    // Column alignment: numeric columns whose right edges line up → right.
+    // Column alignment: numeric columns → right.
     const columns: TableColumn[] = bands.map((b, k) => {
-      const vals = grid.slice(isHeader ? 1 : 0).map((r) => r[k]).filter(Boolean);
-      const numericShare = vals.length ? vals.filter(numeric).length / vals.length : 0;
       const col: TableColumn = { width: Math.round((b.x1 - b.x0) * 10) / 10 };
-      if (numericShare >= 0.7) col.align = "right" as TextAlign;
+      if (isNumCol[k]) col.align = "right" as TextAlign;
       return col;
     });
     // Widen bands to fill the gaps between them (cells have padding).
     const x0 = Math.max(0, bands[0].x0 - 2.5);
     const x1 = Math.min(pageW, bands[bands.length - 1].x1 + 2.5);
-    for (let k = 0; k < bands.length; k++) {
-      const left = k === 0 ? x0 : (bands[k - 1].x1 + bands[k].x0) / 2;
-      const right = k === bands.length - 1 ? x1 : (bands[k].x1 + bands[k + 1].x0) / 2;
-      columns[k].width = Math.round((right - left) * 10) / 10;
-    }
+    // Column edges = midpoints between neighbouring bands, forced to increase
+    // so an overlapping pair can never produce a negative width.
+    const edges: number[] = [x0];
+    for (let k = 1; k < bands.length; k++) edges.push(Math.max(edges[k - 1] + 2, Math.min((bands[k - 1].x1 + bands[k].x0) / 2, x1 - 2 * (bands.length - k))));
+    edges.push(Math.max(edges[edges.length - 1] + 2, x1));
+    for (let k = 0; k < bands.length; k++) columns[k].width = Math.round((edges[k + 1] - edges[k]) * 10) / 10;
 
-    // Alternating row background: every other body row shares one fill, the others have none.
-    const rowFills = (isHeader ? bodyFills : [headerBg, ...bodyFills]).map((f) => f?.fill ?? null);
+    // Alternating row background: every other body row shares one fill, the
+    // others have none. Body rows are the source rows that became grid rows
+    // (spacer rows excluded), in grid order.
+    const bodyRows = gridRows.slice(headerRows).filter((r, k, arr) => grid[headerRows + k]?.some(Boolean));
+    const rowFills = bodyRows.map(rowFill).map((f) => f?.fill ?? null);
     const odd = rowFills.filter((_, k) => k % 2 === 1), even = rowFills.filter((_, k) => k % 2 === 0);
-    const altColor = odd.length && odd[0] && odd.every((f) => f === odd[0]) && even.every((f) => f !== odd[0]) ? odd[0] : undefined;
-    const borderShape = gridShapes.find(({ s }) => (s.kind === "line") || (s.kind === "rect" && (s.height < 0.6 || s.width < 0.6) && (s.fill || s.stroke)));
+    const oddAlt = odd.length && odd[0] && odd.every((f) => f === odd[0]) && even.every((f) => f !== odd[0]) ? odd[0] : undefined;
+    const evenAlt = !oddAlt && even.length > 1 && even[0] && even.every((f) => f === even[0]) && odd.every((f) => f !== even[0]) ? even[0] : undefined;
+    const altColor = oddAlt || evenAlt;
+    const borderShape = gridShapes.find(({ s }) => isRule(s));
     const borderColor = borderShape ? (borderShape.s.stroke || borderShape.s.fill) : undefined;
+    // A grid needs vertical rules; horizontal underlines alone (statement
+    // totals, header rules) do not make a bordered table.
+    const hasGrid = verticalRules >= 2;
 
-    const fontSize = Math.round(first.cells[0].run.fontSize * 10) / 10;
-    const y0 = headerBg ? Math.min(...headerBg.rects.map(({ s }) => s.y)) : first.y - first.h * 0.5;
+    // Cell font = the size carrying most characters in the block; compact cell
+    // padding derived from the source row pitch so the rendered table occupies
+    // the same box as the PDF's rows instead of growing 3× and covering the
+    // text below it.
+    const sizeChars = new Map<number, number>();
+    for (const row of blockRows) for (const c of row.cells) { const k = Math.round(c.run.fontSize * 2) / 2; sizeChars.set(k, (sizeChars.get(k) ?? 0) + c.run.text.length); }
+    const fontSize = [...sizeChars.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? Math.round(first.cells[0].run.fontSize * 10) / 10;
+    const lineMm = fontSize * PT_TO_MM * 1.2;
+    const padV = Math.max(0.2, Math.min(2.5, (medPitch - lineMm) / 2));
+    const padH = Math.max(0.5, Math.min(3, fontSize * PT_TO_MM * 0.35));
+    const y0 = headerBg ? Math.min(...headerBg.rects.map(({ s }) => s.y)) : first.y - padV;
     const element: TableElement = {
       type: "table",
       position: { x: Math.round(x0 * 100) / 100, y: Math.round(Math.max(0, y0) * 100) / 100 },
       width: Math.round((x1 - x0) * 100) / 100,
       columns,
-      rows: (isHeader ? grid.slice(1) : grid),
-      style: { fontSize },
+      rows: (() => { const body = grid.slice(headerRows); while (body.length > 1 && body[0].every((c) => !c)) body.shift(); return body; })(),
+      style: { fontSize, lineHeight: 1.2, padding: `${Math.round(padV * 100) / 100}mm ${Math.round(padH * 100) / 100}mm` },
     };
-    if (isHeader) {
-      element.headers = grid[0];
+    if (headerRows > 0) {
+      element.headers = bands.map((_, k) => grid.slice(0, headerRows).map((r) => r[k]).filter(Boolean).join(" ").trim());
       const hs: Record<string, unknown> = { fontWeight: "bold" };
       if (headerBg) hs.backgroundColor = headerBg.fill;
-      const hc = first.cells[0].run.color;
-      if (hc && hc !== "#000000") hs.color = hc;
+      // One text colour for the header row: the colour carrying most header
+      // characters, and only when a header band gives it contrast (white on
+      // blue). Without a band the first cell's white would be white on white.
+      if (headerBg) {
+        const tally = new Map<string, number>();
+        for (const c of blockRows.slice(0, headerRows).flatMap((r) => r.cells)) tally.set(c.run.color, (tally.get(c.run.color) ?? 0) + c.run.text.length);
+        const hc = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (hc && hc !== "#000000") hs.color = hc;
+      }
       element.headerStyle = hs as any;
     }
-    if (altColor) element.alternatingRowColor = altColor;
-    element.borders = borderColor ? { outer: true, inner: true, color: borderColor, width: 1 } : false;
+    if (oddAlt) element.alternatingRowColor = oddAlt;
+    // Even rows filled (the first body row carries the band): every row gets
+    // the fill and the odd ones are painted back to white. Both HTML
+    // renderers and the Rust exporter read rowStyle / alternateRowStyle.
+    if (evenAlt) { element.rowStyle = { backgroundColor: evenAlt } as any; element.alternateRowStyle = { backgroundColor: "#ffffff" } as any; }
+    element.borders = hasGrid && borderColor ? { outer: true, inner: true, color: borderColor, width: 1 } : false;
+    // Consume the rules and the row fills the table now expresses itself;
+    // other rects (a shaded column, a logo box) stay as shapes behind it.
+    const fillRects = new Set<number>();
+    if (headerBg) for (const { k } of headerBg.rects) fillRects.add(k);
+    // Fills under the header lines (a dark box behind one column's header) are
+    // consumed too: left behind they would sit under black header text.
+    if (headerRows > 0) {
+      const hy0 = gridRows[0].y - gridRows[0].h * 0.5, hy1 = gridRows[headerRows - 1].y + gridRows[headerRows - 1].h * 1.2;
+      for (const { s, k } of gridShapes) if (s.kind === "rect" && s.fill && s.fill.toLowerCase() !== "#ffffff" && !isRule(s) && s.y < hy1 && s.y + s.height > hy0 && s.y >= hy0 - gridRows[0].h) fillRects.add(k);
+    }
+    if (altColor) for (const row of blockRows) { const f = rowFill(row); if (f) for (const { k } of f.rects) fillRects.add(k); }
+    const consumedShapes = gridShapes.filter(({ s, k }) => isRule(s) || fillRects.has(k)).map(({ k }) => k);
+    dbg(`table ${grid.length} rows × ${bands.length} cols at y=${element.position!.y}`, element.headers ?? grid[0]);
 
     for (const k of lineIdx) used.add(k);
-    out.push({ element, lineIdx, shapeIdx: gridShapes.map(({ k }) => k) });
+    out.push({ element, lineIdx, shapeIdx: consumedShapes });
     i = best.j + 1;
   }
   return out;

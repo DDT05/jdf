@@ -64,6 +64,57 @@ interface ShapeOp {
   path?: string;
 }
 
+/**
+ * Rules drawn as chains of short filled rects (Word underlines each column's
+ * width separately, Excel/PowerPoint dash a border) arrive as one rect per
+ * segment: 600–900 shapes on a one-table page and a dashed look once the
+ * renderer anti-aliases the sub-pixel gaps. Join same-fill rects that share a
+ * row (or a column) and touch; the merged rect takes the first segment's
+ * place so paint order is unchanged.
+ */
+function mergeCollinearShapes(shapes: ShapeOp[]): ShapeOp[] {
+  const chain = (input: ShapeOp[], horizontal: boolean): ShapeOp[] => {
+    const groups = new Map<string, { s: ShapeOp; k: number }[]>();
+    input.forEach((s, k) => {
+      if (s.kind !== "rect" || s.stroke || s.path || !s.fill) return;
+      // Rules only (thin in the cross direction). Cell backgrounds stacked in
+      // a column must stay one rect per row — the table detector reads row
+      // fills (header band, alternating rows) from them.
+      if (horizontal ? s.height > 1.0 : s.width > 1.0) return;
+      const key = horizontal
+        ? `${s.fill}|${s.opacity ?? 1}|${s.y.toFixed(1)}|${s.height.toFixed(1)}`
+        : `${s.fill}|${s.opacity ?? 1}|${s.x.toFixed(1)}|${s.width.toFixed(1)}`;
+      const g = groups.get(key); if (g) g.push({ s, k }); else groups.set(key, [{ s, k }]);
+    });
+    const replaceAt = new Map<number, ShapeOp>();
+    const drop = new Set<number>();
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      g.sort((a, b) => horizontal ? a.s.x - b.s.x : a.s.y - b.s.y);
+      let run = [g[0]];
+      const flush = () => {
+        if (run.length >= 2) {
+          const first = run[0].s;
+          const end = Math.max(...run.map(({ s }) => horizontal ? s.x + s.width : s.y + s.height));
+          replaceAt.set(run[0].k, horizontal ? { ...first, width: end - first.x } : { ...first, height: end - first.y });
+          for (let q = 1; q < run.length; q++) drop.add(run[q].k);
+        }
+      };
+      for (let q = 1; q < g.length; q++) {
+        const prev = run[run.length - 1].s, cur = g[q].s;
+        const gap = horizontal ? cur.x - (prev.x + prev.width) : cur.y - (prev.y + prev.height);
+        // Touching segments only: a double rule under a total sits ~0.5 mm
+        // apart and must stay two lines, not become one thick bar.
+        if (gap <= 0.15) run.push(g[q]); else { flush(); run = [g[q]]; }
+      }
+      flush();
+    }
+    if (!replaceAt.size) return input;
+    return input.map((s, k) => replaceAt.get(k) ?? s).filter((_, k) => !drop.has(k));
+  };
+  return chain(chain(shapes, true), false);
+}
+
 interface ParsedOps {
   textOps: TextOp[];
   shapes: ShapeOp[];
@@ -662,6 +713,8 @@ interface TextRun {
   height: number;
   color: string;
   opacity: number;
+  /** Set when the same line was drawn twice at a sub-point offset (fake bold). */
+  bold?: boolean;
 }
 
 interface LinkAnnot {
@@ -1168,8 +1221,38 @@ export async function importPdfToJdf(
       const c = fontMap.get(name) || classifyFont(name || "");
       return `${c.family}|${c.weight || ""}|${c.style || ""}`;
     };
+    // PDF.js over-reports the width of a run that ends in a stretched space
+    // (tables position the next cell with one wide space: "Region " spans to
+    // the next column). Cap the extent at a generous per-glyph estimate so
+    // gaps are judged from where the glyphs really end. Used for merging,
+    // for joining visual rows and for element widths — never use raw
+    // `width` for a gap test (that is how "Recep" + 250 pt of space + the
+    // address column became one line).
+    const extent = (t: TextRun) => {
+      if (!/\s$/.test(t.text)) return t.width; // no trailing space → PDF.js width is the glyph advance, trust it
+      const em = t.fontSize * PT_TO_MM;
+      const est = Math.max(1, t.text.trim().length) * em * kGlyph + em * 0.25;
+      // Pages that stretch trailing spaces (browser-printed tables): cap at
+      // the glyph estimate. Elsewhere trust PDF.js unless implausibly wide.
+      if (stretchedSpaces) return Math.min(t.width, est);
+      return t.width > est * 1.4 ? est : t.width;
+    };
+    // A whitespace-only item wider than a word space is a column gap (Excel /
+    // PowerPoint / Word tables position the next cell with one stretched
+    // space), not a word space: it carries no text and its width would make
+    // the previous run appear to reach the next cell, welding the row into
+    // one line. Drop it; the gap is judged from the neighbours' glyphs.
+    // Justified prose in a narrow column stretches word spaces to 2 em, so
+    // the cut-off is 2 em — except on pages where a quarter of the spaces are
+    // already that wide (a statement page): there the header cells
+    // ("AED million" × 10) sit 1.5 em apart and 1 em is the cut-off.
+    const spaceItems = runs.filter((r) => !r.text.trim() && r.text.length && r.width >= r.fontSize * PT_TO_MM * 0.5);
+    const wideSpaces = spaceItems.filter((r) => r.width >= r.fontSize * PT_TO_MM * 2.0).length;
+    const tabular = spaceItems.length >= 8 && wideSpaces / spaceItems.length >= 0.25;
+    const gapEm = tabular ? 1.0 : 2.0;
     for (const r of runs) {
       if (!r.text.length) continue;
+      if (!r.text.trim() && r.width > r.fontSize * PT_TO_MM * gapEm) continue;
       const last = lines[lines.length - 1];
       if (!last) { lines.push({ ...r }); continue; }
       const sameLine = Math.abs(last.y - r.y) <= Y_TOL;
@@ -1180,23 +1263,12 @@ export async function importPdfToJdf(
         (last.fontName === r.fontName || fontKey(last.fontName) === fontKey(r.fontName)) &&
         last.color === r.color &&
         Math.abs(last.opacity - r.opacity) < 0.05;
-      // PDF.js over-reports the width of a run that ends in a stretched
-      // space (browser-printed tables: "Region " spans to the next column).
-      // Cap the extent at a generous per-glyph estimate so the next run's
-      // gap is judged from where the glyphs really end; allow a little
-      // overlap for kerned per-glyph runs.
       const emMm = r.fontSize * PT_TO_MM;
-      const extent = (t: TextRun) => {
-        if (!/\s$/.test(t.text)) return t.width; // no trailing space → PDF.js width is the glyph advance, trust it
-        const em = t.fontSize * PT_TO_MM;
-        const est = Math.max(1, t.text.trim().length) * em * kGlyph + em * 0.25;
-        // Pages that stretch trailing spaces (browser-printed tables): cap at
-        // the glyph estimate. Elsewhere trust PDF.js unless implausibly wide.
-        if (stretchedSpaces) return Math.min(t.width, est);
-        return t.width > est * 1.4 ? est : t.width;
-      };
       const gapMm = r.x - (last.x + extent(last));
-      const mergeOk = sameLine && sameStyle && gapMm >= -emMm * 0.5 && gapMm <= emMm * 0.45;
+      // A currency sign after a number ("37,431 $ 6": the "$" opens the next
+      // column of a 10-K statement) is not part of that number.
+      const symAfterNumber = /^[$€£¥]$/.test(r.text.trim()) && /[\d)]\s*$/.test(last.text);
+      const mergeOk = sameLine && sameStyle && !symAfterNumber && gapMm >= -emMm * 0.5 && gapMm <= emMm * 0.45;
 
       if (mergeOk) {
         const lastEndsSpace = /\s$/.test(last.text);
@@ -1212,6 +1284,22 @@ export async function importPdfToJdf(
       } else {
         lines.push({ ...r });
       }
+    }
+
+    // Fake bold / outline effects draw the same line two or three times a
+    // fraction of a point apart (10-K cover check-box lines, "CORPORATE
+    // HEADQUARTERS" back pages). Keep one copy, flagged bold, so the renderers
+    // do not overprint smeared text and RAG does not index it twice.
+    {
+      const keep: TextRun[] = [];
+      for (const l of lines) {
+        const t = l.text.trim();
+        const recent = keep.slice(-40);
+        const dup = t.length ? recent.find((k) => Math.abs(k.y - l.y) <= 0.6 && Math.abs(k.x - l.x) <= 0.8 && Math.abs(k.fontSize - l.fontSize) < 0.6 && k.text.trim() === t) : undefined;
+        if (dup) { dup.bold = true; continue; }
+        keep.push(l);
+      }
+      lines.length = 0; lines.push(...keep);
     }
 
     function findLinkForRun(r: TextRun) {
@@ -1235,7 +1323,7 @@ export async function importPdfToJdf(
     // and shapes they consume are skipped below so nothing is drawn twice.
     const tRuns: TRun[] = lines.map((l) => {
       const cls = fontMap.get(l.fontName) || classifyFont(l.fontName || "");
-      return { text: l.text, x: l.x, y: l.y, width: l.width, height: l.height, fontSize: l.fontSize, fontName: l.fontName, color: l.color, bold: cls.weight === "bold" };
+      return { text: l.text, x: l.x, y: l.y, width: extent(l), height: l.height, fontSize: l.fontSize, fontName: l.fontName, color: l.color, bold: cls.weight === "bold" || !!l.bold };
     });
     // Body font size = the size carrying the most characters on the page.
     const sizeChars = new Map<number, number>();
@@ -1244,7 +1332,8 @@ export async function importPdfToJdf(
     // Column gutters (multi-column pages). Known before table detection so two
     // columns of justified prose are never mistaken for a two-column table.
     const gutters = options.readingOrder === false ? [] : detectGutters(lines.map((l) => ({ text: l.text, x: l.x, y: l.y, width: l.width, fontSize: l.fontSize })), bodyFontSize, pageW * PT_TO_MM);
-    const detected = options.detectTables === false ? [] : detectTables(tRuns, ops.shapes, pageW * PT_TO_MM, gutters);
+    const pageShapes = mergeCollinearShapes(ops.shapes);
+    const detected = options.detectTables === false ? [] : detectTables(tRuns, pageShapes, pageW * PT_TO_MM, gutters);
     const consumedLines = new Set<number>();
     const consumedShapes = new Set<number>();
     const tableAtLine = new Map<number, Element>();
@@ -1255,7 +1344,7 @@ export async function importPdfToJdf(
     }
 
     const pageWmm = pageW * PT_TO_MM, pageHmm = pageH * PT_TO_MM;
-    ops.shapes.forEach((sh, shapeIdx) => {
+    pageShapes.forEach((sh, shapeIdx) => {
       if (consumedShapes.has(shapeIdx)) return;
       if (sh.width < 0.3 && sh.height < 0.3) return;
       // Page-background fills (browsers paint the whole page white first) and
@@ -1341,7 +1430,7 @@ export async function importPdfToJdf(
         while (nextOnRow.has(cur)) {
           const j = nextOnRow.get(cur)!, lc = lines[cur], lj = lines[j];
           const em = Math.min(lc.fontSize, lj.fontSize) * PT_TO_MM;
-          const gap = lj.x - (lc.x + lc.width);
+          const gap = lj.x - (lc.x + extent(lc));
           if (gap < -em * 0.3 || gap > em * 0.6) break; // a real gap → separate column / element
           row.push(j); seen.add(j); cur = j;
         }
@@ -1351,7 +1440,7 @@ export async function importPdfToJdf(
     }
     const runStyle = (l: TextRun) => {
       const cls = fontMap.get(l.fontName) || classifyFont(l.fontName || "");
-      return { cls, bold: cls.weight === "bold", italic: cls.style === "italic" };
+      return { cls, bold: cls.weight === "bold" || !!l.bold, italic: cls.style === "italic" };
     };
 
     lines.forEach((l, lineIdx) => {
@@ -1363,7 +1452,7 @@ export async function importPdfToJdf(
       if (row.length > 1) {
         const first = lines[row[0]], last = lines[row[row.length - 1]];
         const base = runStyle(first);
-        const rowEnd = last.x + last.width;
+        const rowEnd = last.x + extent(last);
         const measuredW = Math.max((rowEnd - first.x) * 1.2 + first.fontSize * PT_TO_MM * 0.4, first.fontSize * PT_TO_MM);
         const nextIdx = nextOnRow.get(row[row.length - 1]);
         const cap = nextIdx != null ? lines[nextIdx].x - first.x - first.fontSize * PT_TO_MM * 0.3 : pageWmm - first.x;
@@ -1374,7 +1463,7 @@ export async function importPdfToJdf(
           let text = r.text;
           if (k > 0) {
             const prev = lines[row[k - 1]];
-            const gap = r.x - (prev.x + prev.width);
+            const gap = r.x - (prev.x + extent(prev));
             if (gap > r.fontSize * PT_TO_MM * 0.08 && !/\s$/.test(prev.text) && !/^\s/.test(text)) text = " " + text;
           }
           const run: any = { text };
@@ -1407,7 +1496,7 @@ export async function importPdfToJdf(
         fontSize: Math.round(l.fontSize * 10) / 10,
         fontFamily: cls.family,
       };
-      if (cls.weight === "bold") style.fontWeight = "bold";
+      if (cls.weight === "bold" || l.bold) style.fontWeight = "bold";
       if (cls.style === "italic") style.fontStyle = "italic";
       if (l.color !== "#000000") style.color = l.color;
       if (l.opacity < 0.999) style.opacity = Math.round(l.opacity * 100) / 100;
@@ -1417,7 +1506,7 @@ export async function importPdfToJdf(
       // The rendering font (Inter/Helvetica fallback) is often wider than the
       // PDF's embedded face; a box cut to the PDF's advance width wraps the
       // line onto the one below. Give single lines 20% slack, capped at the page.
-      const measured = Math.max(l.width * 1.2 + l.fontSize * PT_TO_MM * 0.4, l.fontSize * PT_TO_MM);
+      const measured = Math.max(extent(l) * 1.2 + l.fontSize * PT_TO_MM * 0.4, l.fontSize * PT_TO_MM);
       // If l.x is past the page edge (CropBox-offset PDFs sometimes do this
       // for trailing artifacts), `pageWmm - l.x` goes negative and clamps to
       // a 2mm-wide invisible run. Clamp to a positive minimum so the run
@@ -1440,7 +1529,7 @@ export async function importPdfToJdf(
       // splits sections on. Boldness stays required so a 24pt regular
       // paragraph in a marketing PDF is still body text; short lines only,
       // so an emphasised sentence never becomes a heading.
-      if (cls.weight === "bold" && l.text.trim().length <= 120 && !consumedLines.has(lineIdx)) {
+      if ((cls.weight === "bold" || l.bold) && l.text.trim().length <= 120 && !consumedLines.has(lineIdx)) {
         const ratio = bodyFontSize > 0 ? l.fontSize / bodyFontSize : 1;
         if (l.fontSize >= 22 || ratio >= 1.8) text.heading = 1;
         else if (l.fontSize >= 17 || ratio >= 1.35) text.heading = 2;
@@ -1465,7 +1554,7 @@ export async function importPdfToJdf(
         prev.width = Math.max(prev.width ?? 0, text.width ?? 0);
         return;
       }
-      lineMeta.set(text, { w: Math.max(l.fontSize * PT_TO_MM, l.width), size: l.fontSize, face: fontKey(l.fontName) });
+      lineMeta.set(text, { w: Math.max(l.fontSize * PT_TO_MM, extent(l)), size: l.fontSize, face: fontKey(l.fontName) });
       elements.push(text);
     });
 

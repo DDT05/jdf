@@ -1,0 +1,102 @@
+{
+  "$jdf": "1.0.0",
+  "meta": {
+    "title": "Financial statement table fixture",
+    "pageSize": { "width": 210, "height": 297 },
+    "unit": "mm",
+    "margins": { "top": 0, "right": 0, "bottom": 0, "left": 0 }
+  },
+  "pages": [
+    {
+      "id": "p1",
+      "pageSize": { "width": 210, "height": 297 },
+      "margins": { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+      "elements": [
+        {
+          "type": "text",
+          "content": "Condensed statement of profit or loss",
+          "heading": 2,
+          "position": { "x": 20, "y": 20 },
+          "width": 170,
+          "style": { "fontSize": 12, "fontWeight": "bold", "color": "#00338d" }
+        },
+        {
+          "type": "text",
+          "content": "For the three month period ended (unaudited). The table below is what the PDF importer emits for a whitespace-aligned statement: compact cell padding from the source row pitch, a joined two-line header, right-aligned numeric columns, a blank spacer row, no borders.",
+          "position": { "x": 20, "y": 28 },
+          "width": 170,
+          "style": { "fontSize": 8, "lineHeight": 1.3 }
+        },
+        {
+          "type": "table",
+          "position": { "x": 20, "y": 44 },
+          "width": 170,
+          "columns": [
+            { "width": 100 },
+            { "width": 14, "align": "right" },
+            { "width": 28, "align": "right" },
+            { "width": 28, "align": "right" }
+          ],
+          "headers": ["", "Note", "31 Mar 2026 AED million", "31 Mar 2025 AED million"],
+          "headerStyle": { "fontWeight": "bold", "backgroundColor": "#00338d", "color": "#ffffff" },
+          "rows": [
+            ["Interest income", "", "13,756", "13,606"],
+            ["Interest expense", "", "(8,953)", "(9,139)"],
+            ["Net interest income", "", "4,803", "4,467"],
+            ["", "", "", ""],
+            ["Income from Islamic financing and investing products", "", "1,175", "896"],
+            ["Distribution on Islamic deposits", "", "(366)", "(357)"],
+            ["Net income from Islamic financing and investing products", "", "809", "539"],
+            ["", "", "", ""],
+            ["Net foreign exchange loss", "21", "(432)", "(299)"],
+            ["Net gain on investments and derivatives", "22", "2,349", "2,642"],
+            ["Other operating income", "", "348", "262"],
+            ["", "", "", ""],
+            ["Net profit for the period", "", "5,034", "5,135"],
+            ["Basic and diluted earnings per share (AED)", "25", "0.43", "0.44"]
+          ],
+          "borders": false,
+          "style": { "fontSize": 8, "lineHeight": 1.2, "padding": "0.3mm 1mm" }
+        },
+        {
+          "type": "text",
+          "content": "Key metrics (even rows carry the band: rowStyle fills every row, alternateRowStyle paints the odd ones back)",
+          "position": { "x": 20, "y": 130 },
+          "width": 170,
+          "style": { "fontSize": 8, "fontWeight": "bold" }
+        },
+        {
+          "type": "table",
+          "position": { "x": 20, "y": 136 },
+          "width": 170,
+          "columns": [
+            { "width": 70 },
+            { "width": 25, "align": "right" },
+            { "width": 25, "align": "right" },
+            { "width": 25, "align": "right" },
+            { "width": 25, "align": "right" }
+          ],
+          "headers": ["", "Q4’25", "Q3’25", "Q2’25", "Q1’25"],
+          "headerStyle": { "fontWeight": "bold" },
+          "rows": [
+            ["Revenues", "$ 62,403", "$ 57,115", "$ 51,728", "$ 47,778"],
+            ["GAAP Gross Margin", "73%", "72%", "71%", "73%"],
+            ["Operating Cash Flow", "$ 17,341", "$ 3,287", "$ (5,215)", "$ 8,640"],
+            ["Effective Tax Rate", "102%", "63%", "(1,514)%", "(1)%"]
+          ],
+          "rowStyle": { "backgroundColor": "#d6ecff" },
+          "alternateRowStyle": { "backgroundColor": "#ffffff" },
+          "borders": false,
+          "style": { "fontSize": 9, "lineHeight": 1.2, "padding": "1.2mm 1.2mm" }
+        },
+        {
+          "type": "text",
+          "content": "The accompanying notes form an integral part of this fixture.",
+          "position": { "x": 20, "y": 175 },
+          "width": 170,
+          "style": { "fontSize": 7, "fontStyle": "italic" }
+        }
+      ]
+    }
+  ]
+}
